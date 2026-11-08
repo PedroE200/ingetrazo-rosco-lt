@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" version="1.2" baseProfile="tiny">
+<title>reiniciar</title>
+<desc>Reiniciar: a circular arrow in IngeTrazo's icon style. "currentColor" is replaced by the palette's text colour at load time.</desc>
+<!-- Accent disc inside the ring, so the glyph reads at 16 px like the drawing bar. -->
+<circle cx="24" cy="25" r="9" fill="#f37329" fill-opacity="0.45" stroke="none"/>
+<!-- Ring of radius 14 open at the top right, and its arrow head at the top. -->
+<g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+<path d="M 34.7 16 A 14 14 0 1 1 24 11"/>
+<polyline points="22,6 27,11 22,16"/>
+</g>
+</svg>
