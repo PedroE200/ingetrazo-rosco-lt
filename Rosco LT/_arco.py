@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Rosco LT: la barra semicircular Desplazar · Escalar · Simetría · Rotar.
-Con la barra de dibujo activa sus botones van en la mitad de abajo del anillo de
-la barra de dibujo; esta barra suelta solo sale con Alinear (y su submenú) o anclada.
+"""Rosco: la barra semicircular Desplazar · Escalar · Simetría · Rotar.
+Con el anillo instalado sus botones van en la mitad de abajo del anillo de
+el anillo; esta barra suelta solo sale con Alinear (y su submenú) o anclada.
 
 No hay herramientas propias: la barra ACTIVA las nativas de IngeTrazo 0.5.8
 (``MoveTool``, ``ScaleTool``, ``FlipTool``, ``RotateTool``), que ya actúan
-sobre la selección, y la de la extensión «alinear» (``window._rosco_lt_alinear``). Así
+sobre la selección, y la de la extensión «alinear» (``window._rosco_alinear``). Así
 se conservan su snap, el bloqueo de ejes, Ctrl = copia, las medidas tecleadas
 y el deshacer.
 
@@ -46,20 +46,27 @@ from . import _interruptor
 from ._referencia import EscalaReferencia
 from ._vertices import MENSAJE as MENSAJE_VERTICES, EditorVertices
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.modificar")
+from ._ajustes import atributo, registro
 
+log = registro("modificar")
 TINTA = QColor(44, 44, 42)
 
 # ---- Los botones, de izquierda a derecha ---------------------------------------
 ORDEN = ("move", "scale", "flip", "rotate")
-NOMBRES = {"move": "Desplazar: mover · copia · alinear · empujar/tirar · vértices",
+from . import _edicion  # noqa: E402
+NOMBRES = {"move": "Desplazar: mover · copia · alinear · estirar · vértices",
            "scale": "Escalar: libre · por referencia",
            "flip": "Simetría", "rotate": "Rotar: sin copia · con copia",
            "align": "Alinear", "select": "Seleccionar"}
 EXTERNAS = ()                          # botones que abren otra extensión (ninguno)
-MODOS = {"move": ("mover", "copia", "alinear", "empujar/tirar", "vértices"),
+# «estirar» lleva sub-submenú (``_subsub``): estirar por ventana · prolongar a
+# plano. «empujar/tirar» ya no está aquí: lo hace el botón Empujar del rosco
+# (sigue como modo interno de Desplazar).
+MODOS = {"move": ("mover", "copia", "alinear", "estirar", "vértices"),
          "scale": ("libre", "por referencia"),
          "rotate": ("sin copia", "con copia")}
+MODOS = {k: _edicion.modos(k, v) for k, v in MODOS.items()}       # solo los de esta edición
+NOMBRES = _edicion.limpiar(NOMBRES)                   # sin lo de las partes que faltan
 COPIA = {"move": "copia", "rotate": "con copia"}      # el modo que copia
 MENSAJES = {
     "move": "Desplazar: clic en el punto base y en el destino (o teclea la "
@@ -78,7 +85,8 @@ MENSAJES = {
 }
 _CLASES = {"SelectTool": "select", "MoveTool": "move", "ScaleTool": "scale",
            "FlipTool": "flip", "RotateTool": "rotate"}
-TIP = ("Rosco LT: una barra semicircular junto al cursor para Desplazar, "
+MENSAJES = _edicion.limpiar(MENSAJES)
+TIP = ("Rosco: una barra semicircular junto al cursor para Desplazar, "
        "Escalar, Simetría y Rotar la selección.")
 
 # ---- Geometría de la barra (píxeles) -----------------------------------------------
@@ -143,7 +151,7 @@ class _Filtro(QObject):
             return False
 
 
-class BarraModificar:
+class ArcoModificar:
     def __init__(self, app) -> None:
         self.app = app
         self.visible = _leer_bool(
@@ -153,7 +161,7 @@ class BarraModificar:
         self._bajo: str | None = None         # botón bajo el cursor
         self._apretado = False                # un clic de la barra en curso
         self._cerrada: frozenset | None = None  # selección al cerrarla
-        self._forzada = False                 # abierta desde la barra de dibujo, sin selección
+        self._forzada = False                 # abierta desde el anillo, sin selección
         self.submenu_visible = False          # el de Alinear, a la vista
         self._accion = None
         self._filtro = None
@@ -173,6 +181,21 @@ class BarraModificar:
         self._multicopia = None               # Desplazar · copia: (punto base, selección, pila)
         self.referencia = EscalaReferencia(self)   # Escalar «por referencia»
         self.vertices = EditorVertices(self)       # Desplazar «vértices»
+        self.estirar_ventana = self.prolongar = None
+        if _edicion.con("estirar"):
+            from ._estirar import EstirarVentana, ProlongarPlano
+            self.estirar_ventana = EstirarVentana(self)   # Desplazar «estirar» (sub-submenú)
+            self.prolongar = ProlongarPlano(self)
+
+    def reenganchar(self, vp) -> None:
+        """El visor ha cambiado: el filtro y la ventanita pasan al nuevo."""
+        if vp is getattr(self, "_vp_enganchado", None):
+            return
+        self._vp_enganchado = vp
+        self._filtro = _Filtro(self, vp)
+        vp.installEventFilter(self._filtro)
+        if self.win is not None:
+            self.win.vp = vp
 
     # -- instalación --
     def instalar(self) -> None:
@@ -182,8 +205,12 @@ class BarraModificar:
         # El overlay ya no dibuja nada: solo avisa de que algo pudo cambiar.
         app.add_overlay(self.dibujar)
         app.add_overlay(self.vertices.dibujar)    # el cuadradito verde
+        if self.estirar_ventana is not None:
+            app.add_overlay(self.estirar_ventana.dibujar)   # la ventana y lo cogido
+            app.add_overlay(self.prolongar.dibujar)
         self._filtro = _Filtro(self, app.viewport)
         app.viewport.installEventFilter(self._filtro)
+        self._vp_enganchado = app.viewport
         self._reloj = QTimer(app.window)
         self._reloj.setInterval(SINCRONIA_MS)
         self._reloj.timeout.connect(self._sincronizar)
@@ -196,7 +223,7 @@ class BarraModificar:
         if qapp is not None:
             qapp.applicationStateChanged.connect(lambda _e: self._sincronizar())
         self._accion = _interruptor.entrada(
-            app, "barra_modificar", "Barra de modificar (suelta)", self.alternar, TIP)
+            app, "arco_modificar", "Barra de modificar (suelta)", self.alternar, TIP)
         _interruptor.apuntar(app, self._accion, "Barra de modificar (suelta)")
         if self._accion is not None:
             self._accion.setCheckable(True)
@@ -224,8 +251,8 @@ class BarraModificar:
             self.visible = not self.visible
         _ajustes().setValue("visible", self.visible)
         vp = self.app.viewport
-        vp.flash_status(_tr("Rosco LT: barra visible." if self.visible
-                        else "Rosco LT: barra oculta."), 3000)
+        vp.flash_status(_tr("Rosco: barra visible." if self.visible
+                        else "Rosco: barra oculta."), 3000)
         self._sincronizar()
 
     def cerrar(self) -> None:
@@ -238,7 +265,7 @@ class BarraModificar:
         self._sincronizar()
 
     def abrir(self) -> None:
-        """Desde la barra de dibujo (su icono de media corona): Seleccionar con la barra
+        """Desde el anillo (su icono de media corona): Seleccionar con la barra
         abierta junto al cursor, aunque no haya nada seleccionado —
         Desplazar, Escalar y Rotar toman entonces lo que haya bajo el
         cursor en su primer clic."""
@@ -255,14 +282,14 @@ class BarraModificar:
         self._soltar()
         aqui = vp.mapFromGlobal(QCursor.pos())
         if vp.rect().contains(aqui) and not self.anclada:
-            # Llamada desde Rosco LT: aparece ya fija donde está el ratón.
+            # Llamada desde Rosco: aparece ya fija donde está el ratón.
             self.cursor = QPointF(aqui)
             self.fijo = True
             self.ancla = QPointF(aqui)
         # Por código, no con la acción: su ``triggered`` cerraría la barra.
         self._activar_nativa("select")
         vp.setFocus()
-        vp.flash_status(_tr("Rosco LT: elige Desplazar, Escalar, Simetría o Rotar. "
+        vp.flash_status(_tr("Rosco: elige Desplazar, Escalar, Simetría o Rotar. "
                         "Sin selección, toman lo que haya bajo el cursor."), 7000)
         self._sincronizar()
 
@@ -273,23 +300,23 @@ class BarraModificar:
 
     def _alinear(self):
         """El controlador de la extensión «alinear», si está cargada."""
-        ctl = getattr(self.app.window, "_rosco_lt_alinear", None)
+        ctl = getattr(self.app.window, atributo("alinear"), None) or getattr(self.app.window, "_alinear", None)
         return ctl if callable(getattr(ctl, "activar", None)) else None
 
-    def _barra_dibujo(self):
-        """La cadena de la barra de dibujo (``window._rosco_lt_barra_dibujo``), si está."""
-        cadenas = getattr(self.app.window, "_rosco_lt_barra_dibujo", None) or {}
+    def _anillo(self):
+        """La cadena del anillo (``window._rosco_anillos``), si está."""
+        cadenas = getattr(self.app.window, atributo("anillos"), None) or {}
         return next((c for c in cadenas.values()
                      if callable(getattr(c, "activar", None))), None)
 
     def _extension(self, clave):
-        return self._alinear() if clave == "align" else self._barra_dibujo()
+        return self._alinear() if clave == "align" else self._anillo()
 
     @staticmethod
     def _boton_de(clave):
         """El botón de la barra de una herramienta activa (Alinear y
         Empujar/Tirar van dentro de Desplazar)."""
-        return "move" if clave in ("align", "pushpull", "vertices") else clave
+        return "move" if clave in ("align", "pushpull", "vertices", "estirar") else clave
 
     def _clave_activa(self, viewport) -> str | None:
         activa = viewport.active_tool
@@ -297,6 +324,8 @@ class BarraModificar:
             return "scale"
         if activa is self.vertices:
             return "vertices"
+        if activa is not None and (activa is self.estirar_ventana or activa is self.prolongar):
+            return "estirar"
         ctl = self._alinear()
         if ctl is not None and getattr(ctl, "tool", None) is activa:
             return "align"
@@ -326,13 +355,16 @@ class BarraModificar:
         if clave == "move" and self.modo["move"] == "vértices":
             self._activar_vertices()
             return
+        if clave == "move" and self.modo["move"] == "estirar":
+            self._activar_estirar()
+            return
         if clave == "scale" and self.modo["scale"] == "por referencia":
             self._activar_referencia()
             return
         if clave in EXTERNAS:
             ext = self._extension(clave)
             if ext is None:
-                vp.flash_status(_tr("Rosco LT: la extensión «{0}» no está instalada (Extensiones ▸ Abrir carpeta de plugins).", NOMBRES[clave].split(':')[0]), 6000)
+                vp.flash_status(_tr("Rosco: la extensión «{0}» no está instalada (Extensiones ▸ Abrir carpeta de plugins).", NOMBRES[clave].split(':')[0]), 6000)
                 return
             ext.activar()
             self._sincronizar()
@@ -340,7 +372,7 @@ class BarraModificar:
         # La barra sigue fija tras el clic (con el submenú de Alinear, si
         # toca): se eligen las opciones antes del primer punto.
         if not self._activar_nativa(clave):
-            vp.flash_status(_tr("Rosco LT: no encontré la herramienta «{0}».", NOMBRES[clave]), 5000)
+            vp.flash_status(_tr("Rosco: no encontré la herramienta «{0}».", NOMBRES[clave]), 5000)
             return
         vp.setFocus()                   # lo tecleado (medidas) va al visor
         self._armar_copia(vp, decir=False)
@@ -351,7 +383,7 @@ class BarraModificar:
         vp = self.app.viewport
         ctl = self._alinear()
         if ctl is None:
-            vp.flash_status(_tr("Rosco LT: la extensión «Alinear» no está instalada "
+            vp.flash_status(_tr("Rosco: la extensión «Alinear» no está instalada "
                             "(Extensiones ▸ Abrir carpeta de plugins)."), 6000)
             return
         ctl.activar()
@@ -360,7 +392,7 @@ class BarraModificar:
     def _activar_empujar(self) -> None:
         vp = self.app.viewport
         if not self._activar_nativa("pushpull"):
-            vp.flash_status(_tr("Rosco LT: no encontré Empujar/Tirar."), 4000)
+            vp.flash_status(_tr("Rosco: no encontré Empujar/Tirar."), 4000)
             return
         vp.setFocus()
         vp.flash_status(_tr(MENSAJES["pushpull"]), 7000)
@@ -371,6 +403,17 @@ class BarraModificar:
         vp.set_active_tool(self.vertices)
         vp.setFocus()                   # la distancia tecleada va al visor
         vp.flash_status(_tr(MENSAJE_VERTICES), 9000)
+        self._sincronizar()
+
+    def _activar_estirar(self) -> None:
+        """La orden que está a la vista en el hueco «estirar» (la otra queda
+        en su sub-submenú)."""
+        from ._subsub import cara
+        vp = self.app.viewport
+        tool = self.prolongar if cara("move", "estirar") == "prolongar a plano" else self.estirar_ventana
+        vp.set_active_tool(tool)
+        vp.setFocus()                   # la distancia tecleada va al visor
+        vp.flash_status(_tr(tool.MENSAJE), 9000)
         self._sincronizar()
 
     def _activar_referencia(self) -> None:
@@ -394,7 +437,7 @@ class BarraModificar:
         self.modo[clave] = modo
         activa = self._clave_activa(vp)
         if clave == "scale":
-            # Libre = la nativa (tiradores); por referencia = la de la barra de modificar.
+            # Libre = la nativa (tiradores); por referencia = la del arco de modificar.
             if modo == "por referencia":
                 if vp.active_tool is not self.referencia:
                     self._activar_referencia()
@@ -415,7 +458,10 @@ class BarraModificar:
             if activa != "vertices":
                 self._activar_vertices()
             return
-        if clave == "move" and activa in ("align", "pushpull", "vertices"):
+        if clave == "move" and modo == "estirar":
+            self._activar_estirar()           # la de la cara del hueco (puede haber cambiado)
+            return
+        if clave == "move" and activa in ("align", "pushpull", "vertices", "estirar"):
             self._activar_nativa("move")      # de Alinear / Empujar / Vértices a Mover / copia
             vp.flash_status(_tr(MENSAJES["move"]), 5000)
         self._armar_copia(vp)
@@ -536,8 +582,8 @@ class BarraModificar:
             return False
         if not self._forzada and self._con_barra_seleccion():
             # Con Seleccionar, Desplazar, Alinear, Escalar, Simetría y Rotar
-            # manda la barra de selección de la barra de dibujo (lleva estos botones en su
-            # arco de dentro, y Alinear su submenú); la barra de modificar sale anclado o
+            # manda la barra de selección del anillo (lleva estos botones en su
+            # arco de dentro, y Alinear su submenú); el arco de modificar sale anclado o
             # desde ``abrir``.
             return False
         if self._cerrada is not None:
@@ -555,8 +601,8 @@ class BarraModificar:
         return True
 
     def _con_barra_seleccion(self) -> bool:
-        """La barra de dibujo está cargada."""
-        return bool(getattr(self.app.window, "_rosco_lt_barra_dibujo", None))
+        """El anillo está cargado (desde 0.11 trae la barra de selección)."""
+        return bool(getattr(self.app.window, atributo("anillos"), None))
 
     def _con_submenu(self, viewport) -> bool:
         return self._clave_activa(viewport) == "align" and self._alinear() is not None
@@ -702,12 +748,12 @@ class BarraModificar:
         if clave == "cerrar":
             self.anclada = False
             self.cerrar()
-            vp.flash_status(_tr("Rosco LT: barra cerrada."), 2500)
+            vp.flash_status(_tr("Rosco: barra cerrada."), 2500)
             return
         self.anclada = not self.anclada
         vp.flash_status(
-            _tr("Rosco LT: barra anclada aquí (la chincheta la suelta; ✕ la cierra)."
-            if self.anclada else "Rosco LT: barra suelta: vuelve a seguir al ratón."), 4000)
+            _tr("Rosco: barra anclada aquí (la chincheta la suelta; ✕ la cierra)."
+            if self.anclada else "Rosco: barra suelta: vuelve a seguir al ratón."), 4000)
         self._sincronizar()
 
     def _fijar_mascara(self, viewport) -> None:
@@ -911,7 +957,7 @@ class BarraModificar:
             self._dibujar_modos(painter, c, modos)
 
     def _dibujar_modos(self, painter, c, clave) -> None:
-        """El submenú de Desplazar o de Rotar (como los de la barra de dibujo)."""
+        """El submenú de Desplazar o de Rotar (como los del anillo)."""
         g = _panel(c, clave)
         f = QFont(painter.font())
         f.setPointSizeF(8.5)

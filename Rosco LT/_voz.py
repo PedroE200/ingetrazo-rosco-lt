@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Entrada por voz en las cajas de texto de Rosco LT.
+"""Entrada por voz en las cajas de texto de Rosco.
 
 - ``con_microfono(campo, ventana)``: pone un micrófono dentro del campo, a la
   derecha (QLineEdit: como acción; QPlainTextEdit / QTextEdit: un botoncito
   encima, con margen para que no tape el texto). Ayuda: «Dictar por voz».
 - Al pulsarlo: el foco va al campo (al final de lo que haya) y se abre el
-  dictado de Windows (Win+H), en el sitio que Windows decida.
+  dictado del sistema (Win+H), en el sitio que el sistema decida.
 
-(La ventanita de Win+H no se puede mover: Windows la dibuja dentro de una
+(La ventanita de Win+H no se puede mover: el sistema la dibuja dentro de una
 ventana invisible del tamaño de la pantalla. Desde un programa de escritorio
 el reconocimiento en línea no responde y el de escritorio entiende mal, así
-que se usa el dictado de Windows tal cual; si se arrastra, Windows recuerda
+que se usa el dictado del sistema tal cual; si se arrastra, el sistema recuerda
 dónde se dejó.)
 """
 from __future__ import annotations
@@ -27,8 +27,9 @@ from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QLineEdit, QToolButton
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.voz")
+from ._ajustes import registro
 
+log = registro("voz")
 AYUDA = "Dictar por voz"
 
 
@@ -52,7 +53,7 @@ def icono_microfono(color: str = "#6b6b6b") -> QIcon:
     return QIcon(pm)
 
 
-# ---- Windows: Win+H ---------------------------------------------------------
+# ---- Sistema: Win+H ---------------------------------------------------------
 _u32 = ctypes.windll.user32 if os.name == "nt" else None
 VK_LWIN, VK_H, KEYUP = 0x5B, 0x48, 0x0002
 
@@ -65,7 +66,7 @@ def _win_h() -> None:
 
 
 def dictar(campo, ventana=None) -> None:
-    """Foco al campo (al final de lo que haya) y el dictado de Windows."""
+    """Foco al campo (al final de lo que haya) y el dictado del sistema."""
     try:
         w = campo.window()
         w.activateWindow()
@@ -77,18 +78,19 @@ def dictar(campo, ventana=None) -> None:
             c = campo.textCursor()
             c.movePosition(c.MoveOperation.End)
             campo.setTextCursor(c)
-        vigia.pedir(campo, seguir=False)       # también si Windows paró el micrófono
+        vigia.pedir(campo, seguir=False)       # también si el sistema paró el micrófono
     except Exception:  # noqa: BLE001 — sin dictado, el campo sigue funcionando
-        log.exception("no se pudo abrir el dictado de Windows")
+        log.exception("no se pudo abrir el dictado del sistema")
 
 
 # ---- El dictado tras cada punto (Opciones ▸ Dictado de medidas) ---------------
-_CLAVE_MICRO = (r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager"
-                r"\ConsentStore\microphone\MicrosoftWindows.Client.CBS_cw5n1h2txyewy")
+# La clave del registro donde el sistema guarda el permiso del micrófono.
+_CLAVE_MICRO = (r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager"  # nombre técnico
+                r"\ConsentStore\microphone\MicrosoftWindows.Client.CBS_cw5n1h2txyewy")  # nombre técnico
 
 
 def escuchando() -> bool:
-    """Si el dictado de Windows tiene el micrófono abierto: Windows lo apunta
+    """Si el dictado del sistema tiene el micrófono abierto: el sistema lo apunta
     en el registro (sin hora de parada mientras escucha). Win+H abre y cierra,
     y hay que saberlo para no cerrarlo sin querer."""
     if os.name != "nt":
@@ -114,16 +116,16 @@ def _en_primer_plano() -> bool:
 
 
 def _teclas_libres() -> bool:
-    """Sin Ctrl, Mayús, Alt ni Windows pulsadas: con ellas, Win+H sería otra cosa."""
+    """Sin Ctrl, Mayús, Alt ni la tecla Win pulsadas: con ellas, Win+H sería otra cosa."""
     return _u32 is not None and not any(_u32.GetAsyncKeyState(vk) & 0x8000
                                         for vk in (0x10, 0x11, 0x12, 0x5B, 0x5C))
 
 
 class Vigia(QObject):
-    """Quien pulsa Win+H. Lo medido en Windows 11 (06-11-2026):
+    """Quien pulsa Win+H. Lo medido en el sistema (06-11-2026):
 
     - El micrófono se abre en menos de medio segundo.
-    - Si el foco sale de la casilla, Windows lo para unos 100 ms después y no
+    - Si el foco sale de la casilla, el sistema lo para unos 100 ms después y no
       lo reanuda al volver. Win+H lo vuelve a abrir.
     - En silencio lo para solo a los 30 s.
     - Con el micrófono abierto y el foco en una casilla, Win+H lo cierra; sin
@@ -181,7 +183,7 @@ class Vigia(QObject):
 
     def parar(self) -> bool:
         """Deja de vigilar. Cierra el dictado si puede (con el foco en la casilla);
-        sin foco, Windows ya lo está parando. True si ha pulsado Win+H."""
+        sin foco, el sistema ya lo está parando. True si ha pulsado Win+H."""
         pulsado = False
         if self.activo:
             try:
@@ -234,7 +236,7 @@ class Vigia(QObject):
             return
         if self._estado == "escucha":
             # Se ha parado. Por el foco o por el silencio se reanuda; si no,
-            # lo ha parado el usuario (la ✕ o el micrófono de Windows).
+            # lo ha parado el usuario (la ✕ o el micrófono del sistema).
             por_foco = ahora - self._sin_foco < self.PERDIDA_FOCO_S
             por_silencio = ahora - self._desde >= self.SILENCIO_S
             if por_silencio and not por_foco:
@@ -249,7 +251,7 @@ class Vigia(QObject):
                 or ahora - self._ult_pulso < self.ENTRE_PULSOS_S or not _teclas_libres()):
             return
         if self._pulsos >= self.MAX_PULSOS:
-            log.warning("el dictado de Windows no abre el micrófono")
+            log.warning("el dictado del sistema no abre el micrófono")
             self._estado = "quieto"
             if not self.seguir:
                 self._soltar()
@@ -262,7 +264,7 @@ class Vigia(QObject):
 vigia = Vigia()
 
 
-# Lo que Windows escribe al dictar puede venir en palabras y con punto final.
+# Lo que el sistema escribe al dictar puede venir en palabras y con punto final.
 _UNIDADES_VOZ = {"metro": "m", "metros": "m", "centimetro": "cm", "centimetros": "cm",
                  "milimetro": "mm", "milimetros": "mm", "pulgada": "in", "pulgadas": "in",
                  "pie": "ft", "pies": "ft", "m": "m", "cm": "cm", "mm": "mm", "grado": "",
@@ -333,7 +335,7 @@ def medida_dictada(texto: str, miles: bool = False) -> str | None:
     if re.fullmatch(r"[\d.,\s+\-*/()]+(mm|cm|m|in|ft|\"|')?", limpio):
         return re.sub(r"\s+(?=(mm|cm|m|in|ft)$)", "", limpio)
     # «2,5 metros» o «dos coma cinco metros»: separa también la cifra de la coma
-    # y de la unidad (Windows va escribiendo a trozos: «2m» y luego «cincuenta»).
+    # y de la unidad (el sistema va escribiendo a trozos: «2m» y luego «cincuenta»).
     palabras = re.sub(r"(\d)(mm|cm|m|in|ft)\b", r"\1 \2", limpio)
     palabras = re.sub(r"(\d)[,.](\d)", r"\1 coma \2", palabras).replace(",", " ").split()
     unidad, tras_unidad = "", []

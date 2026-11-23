@@ -4,7 +4,7 @@ el nombre ya puesto (el del dibujo + «copia» + fecha y hora), la carpeta y un
 comentario opcional. La copia se escribe aparte: el dibujo abierto sigue
 siendo el mismo archivo y no cambia.
 
-El comentario va dentro de la copia (en los datos de Rosco LT del
+El comentario va dentro de la copia (en los datos de Rosco del
 documento); al abrirla, sale en un aviso abajo (``avisar_al_abrir``).
 """
 from __future__ import annotations
@@ -25,8 +25,9 @@ from PySide6.QtWidgets import (
 from ._tiempo import _ESTILO_BOTONES, _Arrastrable
 from ._voz import con_microfono
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.anillo")
+from ._ajustes import registro
 
+log = registro("anillo")
 MORADO = "#8e5bd6"
 _PROHIBIDOS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -157,7 +158,7 @@ class VentanaCopia(_Arrastrable, QDialog):
         self.nombre.textChanged.connect(lambda _t: self.aviso.setText(""))
         con_microfono(self.nombre)
         fila.addWidget(self.nombre, 1)
-        fila.addWidget(self._rotulo(".igz"))  # no-traducir: extensión de archivo
+        fila.addWidget(self._rotulo(".igz"))
         lay.addLayout(fila)
         lay.addWidget(self._rotulo(_tr("Carpeta")))
         fila = QHBoxLayout()

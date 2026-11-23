@@ -16,8 +16,9 @@ import math
 from PySide6.QtCore import QByteArray, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.iconos")
+from ._ajustes import registro
 
+log = registro("iconos")
 # Trazo común: contorno azul noche, juntas y puntas redondas.
 _G = '<g stroke="#2e3047" stroke-width="3" stroke-linejoin="round" stroke-linecap="round">'
 _GR = '<g stroke-linejoin="round" stroke-linecap="round">'
@@ -44,7 +45,7 @@ _PEGAR = (_G + '<rect x="9" y="10" width="46" height="51" rx="5" fill="#d9b47e"/
           '<g stroke="#8ec5e8" stroke-width="3"><line x1="22" y1="29" x2="42" y2="29"/>'
           '<line x1="22" y1="37" x2="42" y2="37"/><line x1="22" y1="45" x2="34" y2="45"/></g>')
 
-# El contorno de la mano de la barra de modificar (índice arriba, pulgar abajo, dedos
+# El contorno de la mano del arco de modificar (índice arriba, pulgar abajo, dedos
 # doblados detrás y la muñeca abajo a la derecha).
 _MANO = ("M12.5 10.8 C15 8.5 19 7 24.8 6 C30 6 37 9.5 42.9 12.4 C47 14 51 16.5 52.5 19.3 "
          "C54.5 22 55 24 55.5 26.5 C57 31 58 35 58.6 38 C60 43 62 47 63.4 50.1 "
@@ -59,7 +60,7 @@ _DESHACER = (_GR + '<path d="M54 50 C54 26 38 20 20 24" fill="none" stroke="#2e3
              '<polygon points="6,26 24,12 26,36" fill="#f6c54a" stroke="#2e3047" stroke-width="3"/></g>')
 
 SVG = {
-    # -- Barra de dibujo --
+    # -- el anillo --
     "linea": _G + '<g transform="rotate(-45 36 30)">'
              '<path d="M6 30 L16 23 L16 37 Z" fill="#f3dcb2"/>'
              '<path d="M6 30 L10 27.2 L10 32.8 Z" fill="#2e3047"/>'
@@ -114,7 +115,7 @@ SVG = {
              '<rect x="5" y="11" width="38" height="40" rx="11" fill="#e5534b"/>'
              '<circle cx="24" cy="31" r="11" fill="#dde3ef"/><circle cx="24" cy="31" r="3.5" fill="#2e3047"/>'
              '<path d="M10 22 A12 12 0 0 1 16 15" fill="none" stroke="#fff" stroke-width="2.5"/></g>',
-    # -- Barra de modificar --
+    # -- el arco de modificar --
     "move": _G + '<polygon points="32,4 43,15 36,15 36,28 49,28 49,21 60,32 49,43 49,36 36,36 36,49 '
             '43,49 32,60 21,49 28,49 28,36 15,36 15,43 4,32 15,21 15,28 28,28 28,15 21,15" fill="#e5534b"/>'
             '<circle cx="32" cy="32" r="6" fill="#fff"/></g>',
@@ -133,9 +134,9 @@ SVG = {
               '<path d="M13 38 A19 19 0 1 1 30 53" fill="none" stroke="#e5534b" stroke-width="5"/>'
               '<g stroke="#2e3047" stroke-width="3"><polygon points="21,55 33,45 34,61" fill="#e5534b"/>'
               '<rect x="25" y="25" width="14" height="14" rx="2" fill="#8ec5e8" transform="rotate(20 32 32)"/></g></g>',
-    # Rosco LT: el arquitecto (casco y traje) en silueta negra con un
+    # Rosco: el arquitecto (casco y traje) en silueta negra con un
     # filo blanco, dentro de una diana de tiro roja y blanca, con la mira.
-    "barra_dibujo": '<defs><clipPath id="diana_arq"><circle cx="32" cy="32" r="30"/></clipPath></defs>'
+    "anillo": '<defs><clipPath id="diana_arq"><circle cx="32" cy="32" r="30"/></clipPath></defs>'
              + '<g stroke="#8a1414" stroke-width="1.2">'
              + "".join(f'<circle cx="32" cy="32" r="{30 - 6 * i}" fill="{c}"/>'
                        for i, c in enumerate(("#d62222", "#ffffff", "#d62222", "#ffffff", "#d62222")))
@@ -155,9 +156,22 @@ SVG = {
                        f'<line x1="{a}" y1="{b}" x2="{c}" y2="{d}" stroke="#ffffff" stroke-width="2"/>'
                        for a, b, c, d in ((32, 1, 32, 9), (32, 55, 32, 63), (1, 32, 9, 32), (55, 32, 63, 32)))
              + '</g>',
-    # Rosco LT: la mano de la imagen de referencia (de canto, ligeramente
+    # Encender / apagar Rosco: la diana del arquitecto, con su mira, y el
+    # símbolo de encendido negro con filo blanco en el centro.
+    "interruptor": '<g stroke="#8a1414" stroke-width="1.2">'
+                   + "".join(f'<circle cx="32" cy="32" r="{30 - 6 * i}" fill="{c}"/>'
+                             for i, c in enumerate(("#d62222", "#ffffff", "#d62222", "#ffffff", "#d62222")))
+                   + '</g><g stroke-linecap="round">'
+                   + "".join(f'<line x1="{a}" y1="{b}" x2="{c}" y2="{d}" stroke="#8a1414" stroke-width="4.4"/>'
+                             f'<line x1="{a}" y1="{b}" x2="{c}" y2="{d}" stroke="#ffffff" stroke-width="2"/>'
+                             for a, b, c, d in ((32, 1, 32, 9), (32, 55, 32, 63), (1, 32, 9, 32), (55, 32, 63, 32)))
+                   + "".join(f'<path d="M23.64 23.04 A13 13 0 1 0 40.36 23.04" fill="none" stroke="{c}" '
+                             f'stroke-width="{w}"/><path d="M32 16 L32 31" fill="none" stroke="{c}" stroke-width="{w}"/>'
+                             for c, w in (("#ffffff", 8.7), ("#111111", 5.5)))
+                   + '</g>',
+    # Rosco: la mano de la imagen de referencia (de canto, ligeramente
     # inclinada) que pellizca la cruz de flechas entre el índice y el pulgar.
-    "barra_modificar": '<g transform="translate(32 32) scale(0.94) translate(-32 -32)" '
+    "arco_modificar": '<g transform="translate(32 32) scale(0.94) translate(-32 -32)" '
                 'stroke-linejoin="round" stroke-linecap="round">'
                 f'<path d="{_MANO}" fill="#fcd3a1"/>'
                 '<path d="M52.5 19.3 C55 24 57 31 58.6 38 C60 43 62 47 63.4 50.1 C63.5 53 63.3 55 62.8 56.1 '
@@ -213,6 +227,12 @@ SVG = {
                 '<path d="M48 27 L26 38 L26 61 L48 50 Z" fill="#8ec5e8"/>'
                 '<path d="M38 8 A14 14 0 0 1 58 20" fill="none" stroke-width="3.5"/>'
                 '<polygon points="60,26 53,19 61,16" fill="#2e3047"/></g>',
+    # Explotar: una caja con cuatro flechas que salen hacia fuera.
+    "explotar": _G + '<path d="M21 23 L32 17 L43 23 L32 29 Z" fill="#ffffff"/>'
+                '<path d="M21 23 L32 29 L32 42 L21 36 Z" fill="#e5534b"/>'
+                '<path d="M43 23 L32 29 L32 42 L43 36 Z" fill="#8ec5e8"/>'
+                '<path d="M17 15 L7 5 M7 5 H15 M7 5 V13 M47 15 L57 5 M57 5 H49 M57 5 V13 '
+                'M17 47 L7 57 M7 57 H15 M7 57 V49 M47 47 L57 57 M57 57 H49 M57 57 V49" fill="none"/></g>',
     # Invertir cara: la cara (clara) y su dorso (rojo), con la flecha que la voltea.
     "invertir": _G + '<path d="M6 22 L28 14 L28 54 L6 62 Z" fill="#dde3ef"/>'
                 '<path d="M36 14 L58 22 L58 62 L36 54 Z" fill="#e5534b"/>'
@@ -291,6 +311,15 @@ SVG = {
     # -- Diana --
     "buscar": _LUPA + '</g></g>',
     "zoom_sel": _LUPA + '<rect x="19" y="19" width="14" height="14" rx="1.5" fill="#8ec5e8" stroke-width="2.5"/></g></g>',
+    # Selección rápida: la lupa de zoom con un rayo; Alinear vista: una cara
+    # inclinada con su normal (la flecha) y el ángulo recto.
+    "sel_rapida": _LUPA + '<rect x="19" y="19" width="14" height="14" rx="1.5" fill="#8ec5e8" stroke-width="2.5"/></g></g>'
+                  '<path d="M47 2 L36 24 H45 L39 42 L60 16 H50 L57 2 Z" fill="#f6c54a" stroke="#b07a10"'
+                  ' stroke-width="2" stroke-linejoin="round"/>',
+    "alinear_vista": _G + '<path d="M8 46 L30 22 L58 32 L36 58 Z" fill="#b3dcf2"/>'
+                     '<path d="M33 40 L33 30 L41 33" fill="none" stroke-width="2"/>'
+                     '<line x1="33" y1="40" x2="20" y2="8" stroke="#e5534b" stroke-width="4"/>'
+                     '<path d="M12 14 L19 3 L27 11 Z" fill="#e5534b" stroke="#e5534b"/></g>',
     "zoom_previo": _LUPA + '<line x1="34" y1="26" x2="20" y2="26" stroke-width="3.5"/>'
                    '<polygon points="15,26 22,20 22,32" fill="#2e3047"/></g></g>',
     "centrar": _G + '<path d="M8 20 V8 H20 M44 8 H56 V20 M56 44 V56 H44 M20 56 H8 V44" fill="none" stroke-width="5"/>'
@@ -356,6 +385,24 @@ SVG = {
     "limpia": _G + '<rect x="15" y="17" width="34" height="30" rx="3" fill="#8ec5e8"/>'
               '<line x1="21" y1="24" x2="31" y2="24" stroke="#fff" stroke-width="2.5"/>'
               '<path d="M5 16 V5 H16 M48 5 H59 V16 M59 48 V59 H48 M16 59 H5 V48" fill="none" stroke-width="5"/></g>',
+    # 3.2.0: Pantalla limpia por partes (en el anillo): la ventana con la
+    # parte que se quita en azul.
+    "l_menus": _G + '<rect x="5" y="9" width="54" height="46" rx="4" fill="#ffffff"/><rect x="5" y="9" width="54" height="11" rx="4" fill="#8ec5e8"/>'
+               '<line x1="11" y1="14.5" x2="19" y2="14.5" stroke-width="2.5"/>'
+               '<line x1="24" y1="14.5" x2="32" y2="14.5" stroke-width="2.5"/>'
+               '<line x1="37" y1="14.5" x2="45" y2="14.5" stroke-width="2.5"/></g>',
+    "l_barras": _G + '<rect x="5" y="9" width="54" height="46" rx="4" fill="#ffffff"/><line x1="5" y1="17" x2="59" y2="17" stroke-width="2"/>'
+                '<rect x="10" y="21" width="9" height="9" rx="1.5" fill="#8ec5e8" stroke-width="2"/>'
+                '<rect x="22" y="21" width="9" height="9" rx="1.5" fill="#8ec5e8" stroke-width="2"/>'
+                '<rect x="34" y="21" width="9" height="9" rx="1.5" fill="#8ec5e8" stroke-width="2"/>'
+                '<rect x="46" y="21" width="9" height="9" rx="1.5" fill="#8ec5e8" stroke-width="2"/></g>',
+    "l_estado": _G + '<rect x="5" y="9" width="54" height="46" rx="4" fill="#ffffff"/><line x1="5" y1="17" x2="59" y2="17" stroke-width="2"/>'
+                '<rect x="5" y="44" width="54" height="11" rx="4" fill="#8ec5e8"/>'
+                '<line x1="11" y1="49.5" x2="27" y2="49.5" stroke-width="2.5"/></g>',
+    "l_paneles": _G + '<rect x="5" y="9" width="54" height="46" rx="4" fill="#ffffff"/><line x1="5" y1="17" x2="59" y2="17" stroke-width="2"/>'
+                 '<rect x="40" y="17" width="19" height="38" rx="2" fill="#8ec5e8"/>'
+                 '<line x1="44" y1="24" x2="55" y2="24" stroke-width="2.5"/>'
+                 '<line x1="44" y1="31" x2="55" y2="31" stroke-width="2.5"/></g>',
     # Pintar: el cubo de pintura volcando, y el gotero de muestrear.
     "pintar": _G + '<path d="M12 26 L30 8 L52 30 L34 48 Z" fill="#8ec5e8"/>'
               '<path d="M12 26 L30 8 L52 30" fill="none" stroke-width="3.5"/>'
@@ -431,7 +478,29 @@ SVG = {
     "m_paralela": _G + '<line x1="10" y1="20" x2="54" y2="20" stroke-width="5"/>'
                   '<line x1="10" y1="44" x2="54" y2="44" stroke="#e5534b" stroke-width="5"/>'
                   '<path d="M32 24 V40 M27 35 L32 40 L37 35" fill="none" stroke-width="3"/></g>',
-    "m_redondear": _G + '<path d="M10 10 H30 M10 10 V30" fill="none" stroke="#b9c3d9" stroke-width="3" stroke-dasharray="4 3"/>'
+    # Seleccionar ▸ selección / deselección múltiple: la flecha con + o −.
+    "m_sel_mas": _G + '<path d="M10 6 L10 44 L20 35 L27 52 L33 49 L26 33 L39 33 Z" fill="#ffffff"/>'
+                 '<circle cx="47" cy="47" r="13" fill="#2e9e4f" stroke="#1d6b34"/>'
+                 '<path d="M47 40 V54 M40 47 H54" stroke="#ffffff" stroke-width="4"/></g>',
+    "m_sel_menos": _G + '<path d="M10 6 L10 44 L20 35 L27 52 L33 49 L26 33 L39 33 Z" fill="#ffffff"/>'
+                   '<circle cx="47" cy="47" r="13" fill="#d62222" stroke="#8a1414"/>'
+                   '<path d="M40 47 H54" stroke="#ffffff" stroke-width="4"/></g>',
+    # Estirar por ventana: una pieza con su punta dentro de la ventana a
+    # trazos y la flecha hacia donde se estira.
+    "m_estirar": _G + '<path d="M6 24 H40 V40 H6 Z" fill="#dde3ef"/>'
+                 '<rect x="28" y="14" width="22" height="36" fill="none" stroke="#e5534b" stroke-width="2.5" stroke-dasharray="4 3"/>'
+                 '<path d="M42 32 H60 M53 25 L60 32 L53 39" fill="none" stroke="#e5534b" stroke-width="4"/></g>',
+    # Prolongar a plano: la pieza, lo que se alarga a trazos y el plano.
+    "m_prolongar": _G + '<path d="M4 26 H34 V38 H4 Z" fill="#dde3ef"/>'
+                   '<path d="M34 26 H50 V38 H34" fill="none" stroke="#e5534b" stroke-width="2.5" stroke-dasharray="4 3"/>'
+                   '<path d="M54 8 V56" stroke="#e5534b" stroke-width="5"/>'
+                   '<path d="M57 12 L62 7 M57 22 L62 17 M57 32 L62 27 M57 42 L62 37 M57 52 L62 47" stroke-width="2"/></g>',
+    # Contorno 3D: un sólido y el perímetro paralelo a trazos.
+    "m_contorno3d": _G + '<path d="M20 26 L34 18 L50 26 L50 42 L36 50 L20 42 Z" fill="#dde3ef"/>'
+                    '<path d="M20 26 L36 34 L50 26 M36 34 V50" fill="none" stroke-width="2.5"/>'
+                    '<path d="M10 24 L34 10 L60 24 L60 46 L36 60 L10 46 Z" fill="none" stroke="#e5534b" '
+                    'stroke-width="2.5" stroke-dasharray="5 3"/></g>',
+    "m_redondear": _G +'<path d="M10 10 H30 M10 10 V30" fill="none" stroke="#b9c3d9" stroke-width="3" stroke-dasharray="4 3"/>'
                    '<path d="M10 56 V30 A20 20 0 0 1 30 10 H56" fill="none" stroke-width="6"/>'
                    '<path d="M10 56 V30 A20 20 0 0 1 30 10 H56" fill="none" stroke="#f6c54a" stroke-width="2.5"/></g>',
     "m_ventana": _G + '<rect x="8" y="10" width="46" height="36" fill="#dde3ef" stroke-dasharray="6 4" stroke-width="3"/>'
@@ -500,9 +569,41 @@ SVG = {
                        '<path d="M4 18 H22 M42 18 H60" stroke="#e5534b" stroke-width="3" stroke-dasharray="4 3"/></g>',
     "seccion": _G + '<path d="M32 8 L56 20 L32 32 L8 20 Z M8 20 V46 L32 58 L56 46 V20 M32 32 V58" fill="#dde3ef"/>'
                '<path d="M4 30 L36 14 L60 28 L28 44 Z" fill="#e5534b" fill-opacity="0.45" stroke="#c62828" stroke-width="2.5"/></g>',
+    # 2.49.0: las órdenes nuevas de los subroscos.
+    "m_sigueme": _G + '<path d="M8 50 L20 14 L44 14 L56 50" fill="none" stroke="#e5534b" stroke-width="3" stroke-dasharray="5 4"/>'
+                 '<path d="M14 54 L22 46 L30 54 L22 62 Z" fill="#f6c54a"/></g>',
+    "m_puente": _G + '<rect x="6" y="36" width="18" height="20" fill="#dde3ef"/>'
+                '<rect x="40" y="36" width="18" height="20" fill="#dde3ef"/>'
+                '<path d="M24 36 L40 36 L40 46 L24 46 Z" fill="#8ec5e8"/>'
+                '<path d="M10 30 C20 18 44 18 54 30" fill="none" stroke="#e5534b" stroke-width="3"/></g>',
+    "m_ruta": _G + '<path d="M8 54 C16 30 30 50 36 30 C40 16 52 22 56 10" fill="none" stroke="#2fa36b" stroke-width="4"/>'
+              '<circle cx="8" cy="54" r="4" fill="#e5534b"/><circle cx="56" cy="10" r="4" fill="#e5534b"/></g>',
+    "m_transportador": _G + '<path d="M6 52 A26 26 0 0 1 58 52 Z" fill="#f6c54a"/>'
+                       '<path d="M32 52 L50 24" stroke="#e5534b" stroke-width="3"/>'
+                       '<circle cx="32" cy="52" r="3" fill="#2e3047"/></g>',
+    "m_etiqueta": _G + '<rect x="22" y="8" width="36" height="20" rx="3" fill="#ffffff"/>'
+                  '<path d="M27 14 H52 M27 21 H44" stroke-width="2"/><path d="M28 28 L10 54" stroke-width="2.5"/>'
+                  '<circle cx="10" cy="54" r="3" fill="#e5534b"/></g>',
+    "m_texto3d": _G + '<path d="M12 14 H44 V22 H33 V52 H23 V22 H12 Z" fill="#7fc8a0" transform="translate(6 4)"/>'
+                 '<path d="M12 14 H44 V22 H33 V52 H23 V22 H12 Z" fill="#2fa36b"/></g>',
+    "m_mano": _G + '<path d="M8 50 C14 30 22 54 30 34 C36 20 44 44 56 14" fill="none" stroke="#2e3047" stroke-width="3.5"/>'
+              '<path d="M50 8 L58 16 L44 30 L36 32 L38 24 Z" fill="#f6c54a" stroke-width="2"/></g>',
+    "m_anotar": _G + '<rect x="6" y="8" width="52" height="40" rx="3" fill="#ffffff"/>'
+                '<path d="M14 36 C20 20 28 40 34 24 C38 16 44 30 50 20" fill="none" stroke="#e5534b" stroke-width="3.5"/>'
+                '<path d="M24 56 H40" stroke-width="3"/></g>',
+    "m_borrar_anot": _G + '<rect x="6" y="8" width="52" height="40" rx="3" fill="#ffffff"/>'
+                     '<path d="M14 36 C20 20 28 40 34 24" fill="none" stroke="#e5534b" stroke-width="3.5" stroke-opacity="0.35"/>'
+                     '<g transform="rotate(-30 40 34)"><rect x="28" y="26" width="26" height="14" rx="3" fill="#f4a3a0"/></g></g>',
+    "m_planos_sec": _G + '<path d="M8 22 L40 8 L56 22 L24 36 Z" fill="#e5534b" fill-opacity="0.35" stroke="#c62828"/>'
+                    '<path d="M24 36 V58 M8 22 V44 L24 58" fill="none" stroke-dasharray="4 3"/></g>',
+    "m_cortes_sec": _G + '<path d="M32 8 L56 20 L32 32 L8 20 Z" fill="#dde3ef"/>'
+                    '<path d="M8 20 V46 L32 58 L56 46 V20 M32 32 V58" fill="none" stroke-dasharray="4 3"/>'
+                    '<path d="M8 34 L32 46 L56 34" fill="none" stroke="#c62828" stroke-width="4"/></g>',
+    "m_relleno_sec": _G + '<path d="M8 30 L32 42 L56 30 L32 18 Z" fill="#2e3047"/>'
+                     '<path d="M8 30 V46 L32 58 L56 46 V30" fill="#dde3ef"/></g>',
 }
-ALIAS = {"ocultar_resto": "ocultar", "ocultar_uno": "ocultar", "empujar": "m_empujar",
-         "nav": "arbol", "apagar": "cerrar_app"}
+ALIAS = {"ocultar_resto": "ocultar", "ocultar_uno": "ocultar", "empujar": "m_empujar", "portapapeles": "pegar",
+         "nav": "arbol", "apagar": "interruptor"}
 
 _RENDER: dict = {}
 _CACHE: dict = {}
@@ -511,9 +612,9 @@ _CACHE: dict = {}
 # Lo pone la barra al cambiar de tema. Los temas C a N también: la silueta
 # va en líneas y sombreado (``_flotante.PALETA``).
 SILUETAS = False
-# Los comandos del gestor de barras puestos en un hueco («mh:<clave>»): su
-# QIcon y su nombre los da el gestor de barras (lo pone la barra).
-EXTERNO = "mh:"
+# Los comandos del gestor de barras puestos en un hueco (``PREFIJO_EXTERNO`` +
+# su clave): su QIcon y su nombre los da el gestor de barras (lo pone la barra).
+from ._gestor import PREFIJO_EXTERNO as EXTERNO  # noqa: E402
 ICONO_EXTERNO = None                    # callable(clave) -> QIcon | None
 NOMBRE_EXTERNO = None                   # callable(clave) -> str
 

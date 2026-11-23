@@ -20,7 +20,7 @@ menú por cada Tool definida allí.
 """
 from __future__ import annotations
 
-from ._idioma import _tr
+from ._idioma import con_nombre, _tr
 import logging
 import math
 
@@ -31,8 +31,9 @@ from core.history import Command
 from core.units import fmt_len
 from tools.base import Tool, ToolContext
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.modificar")
+from ._ajustes import registro
 
+log = registro("modificar")
 VERDE, VERDE_OSCURO = QColor(48, 215, 91), QColor(13, 70, 28)
 AZUL = QColor(34, 102, 204)
 LADO_PX = 11.0                          # el cuadradito verde
@@ -171,7 +172,7 @@ class MoverVertice(Command):
 # ---- La herramienta ------------------------------------------------------------------
 
 class EditorVertices(Tool):
-    name = "Rosco LT · editor de vértices"
+    name = con_nombre("Rosco · editor de vértices")
     icon = "move"
     description = ("Move any vertex, inside closed groups too: hover it and drag "
                    "its green square.")

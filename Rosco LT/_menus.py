@@ -12,6 +12,7 @@ al abrirse, como Extensiones). Se cierra al pinchar fuera.
 """
 from __future__ import annotations
 
+from ._flotante import mover_a
 from ._idioma import _tr
 import logging
 import unicodedata
@@ -22,8 +23,9 @@ from PySide6.QtWidgets import (
     QFrame, QHeaderView, QLineEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.anillo")
+from ._ajustes import registro
 
+log = registro("anillo")
 ANCHO, ALTO = 340, 460
 ROJO = "#d62222"
 
@@ -42,7 +44,7 @@ def _plano(texto: str) -> str:
 
 class _Cierre(QObject):
     """Al cerrarse (clic fuera, Esc), el clic que lo cerró no debe llegar
-    al modelo: Windows lo entrega también al visor."""
+    al modelo: el sistema lo entrega también al visor."""
 
     def __init__(self, parent, cadena) -> None:
         super().__init__(parent)
@@ -65,9 +67,9 @@ class MenusArbol:
     def _crear(self) -> None:
         win = self.cadena.app.window
         v = self.ventana = QFrame(win, Qt.Popup)
-        v.setObjectName("rosco_lt_menus")
+        v.setObjectName("rosco_menus")
         v.setStyleSheet(
-            f"QFrame#rosco_lt_menus {{ border: 1.5px solid {ROJO}; border-radius: 6px; }}")
+            f"QFrame#rosco_menus {{ border: 1.5px solid {ROJO}; border-radius: 6px; }}")
         lay = QVBoxLayout(v)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(6)
@@ -199,6 +201,6 @@ class MenusArbol:
         r = QRect(global_pos, self.ventana.size())
         r.moveLeft(max(pantalla.left(), min(r.left(), pantalla.right() - r.width())))
         r.moveTop(max(pantalla.top(), min(r.top(), pantalla.bottom() - r.height())))
-        self.ventana.move(r.topLeft())
+        mover_a(self.ventana, r.topLeft())
         self.ventana.show()
         self.filtro.setFocus()

@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""La barra de herramientas «Rosco LT», común a todas las piezas (la barra de dibujo,
+"""La barra de herramientas «Rosco», común a todas las piezas (el anillo,
 Reiniciar…): se crea una vez y cada pieza le añade su botón."""
 from __future__ import annotations
 
-from ._idioma import _tr
+from ._idioma import con_nombre, _tr
 import logging
 
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtWidgets import QToolBar
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt")
+from ._ajustes import atributo, objeto, registro
 
-TOOLBAR = "rosco_lt_toolbar"
-TITULO = "Rosco LT"
+log = registro()
+TOOLBAR = objeto("toolbar")
+TITULO = con_nombre("Rosco")
 ESPERA_MS = 1500        # tras el arranque (IngeTrazo restaura entonces las barras)
 
 
@@ -33,13 +34,13 @@ def _colocar_primera_vez(win, tb) -> None:
             tb.show()
             ajustes.setValue("barra/colocada", True)
         except Exception:  # noqa: BLE001
-            log.exception("no se pudo colocar la barra Rosco LT")
+            log.exception("no se pudo colocar la barra Rosco")
 
     QTimer.singleShot(ESPERA_MS, colocar)
 
 
 def barra(app) -> QToolBar:
-    """La barra «Rosco LT», creada como las propias de IngeTrazo (Dibujo,
+    """La barra «Rosco», creada como las propias de IngeTrazo (Dibujo,
     Modificar…): movible, flotante, con el tamaño de icono de las
     preferencias y su entrada en el menú de barras."""
     win = app.window
@@ -67,12 +68,12 @@ def barra(app) -> QToolBar:
         tb.setIconSize(QSize(px, px))
         tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
         win.addToolBar(Qt.TopToolBarArea, tb)
-    tb._rosco_lt_refs = []                 # las acciones viven lo que la barra
+    setattr(tb, atributo("refs"), [])   # las acciones viven lo que la barra
     _colocar_primera_vez(win, tb)
     return tb
 
 
 def anadir(app, accion) -> None:
     tb = barra(app)
-    tb.addAction(_tr(accion))
-    tb._rosco_lt_refs.append(accion)
+    tb.addAction(accion)
+    getattr(tb, atributo("refs")).append(accion)

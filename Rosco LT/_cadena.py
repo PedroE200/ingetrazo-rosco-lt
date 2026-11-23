@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Rosco LT: la cadena Base → Empujar/Tirar → Base…, con su anillo partido.
+"""Rosco: la cadena Base → Empujar/Tirar → Base…, con su anillo partido.
 
 El anillo lo reúne todo alrededor del cursor, sin botones para saltar de
 una barra a otra: la mitad de arriba dibuja (lo de abajo de esta nota) y la
-de abajo modifica (la barra de modificar dentro; Suprimir, Agrupar, Cortar, Copiar e
+de abajo modifica (el arco de modificar dentro; Suprimir, Agrupar, Cortar, Copiar e
 Invertir cara fuera). El ✕ va en el hueco de la derecha, junto al cursor;
 arriba, al lado de la chincheta, Pantalla limpia.
 
@@ -18,7 +18,7 @@ Herramientas (subclases de las nativas de IngeTrazo 0.5.8):
   cara; o ``GuiaCadena``, una línea guía por dos puntos), Borrar
   (``BorradorCadena``: borrar u ocultar), Seleccionar (``SeleccionCadena``:
   ventana nativa o lazo), Grupo (al terminar cada pieza: nada, grupo o
-  componente, con nombre opcional) y el enlace a la barra de modificar.
+  componente, con nombre opcional) y el enlace al arco de modificar.
 
 Al confirmar una base, ``EmpujarCadena`` (``PushPullTool``) recibe la cara
 nueva y simula su primer clic: entra directamente en «arrastrando altura». Al
@@ -37,8 +37,8 @@ aún usa la herramienta activa justo después de ``on_click`` / ``on_value``.
 """
 from __future__ import annotations
 
-from ._gestor import gestor_barras
-from ._idioma import _tr
+from ._gestor import gestor_barras, ordenes_voz, texturas
+from ._idioma import con_nombre, _tr
 import dataclasses
 import logging
 import math
@@ -50,11 +50,10 @@ from PySide6.QtCore import (
     QByteArray, QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer,
 )
 from PySide6.QtGui import (
-    QTextDocument,
-    QAction, QBrush, QColor, QCursor, QFont, QFontMetricsF, QIcon, QPainter,
+    QAction, QBrush, QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QIcon, QImage, QPainter,
     QLinearGradient, QPainterPath, QPen, QPixmap, QPolygonF, QTransform, QVector3D,
 )
-from PySide6.QtWidgets import QApplication, QInputDialog
+from PySide6.QtWidgets import QApplication, QInputDialog, QToolTip
 
 from core.units import fmt_len
 from tools.base import Tool, ToolContext
@@ -78,21 +77,28 @@ from ._flotante import (
     mascara_chincheta, rayar, rect_etiqueta, relieve_redondo, restaurar_cursor,
     sector, sombra, texto_chincheta, _flecha, centro_boton,
 )
-from . import _anima, _capas, _diana, _empuje, _flotante, _huecos, _iconos, _idioma, _interruptor, _seleccion, _temas
+from . import _capas, _diana, _edicion, _empuje, _flotante, _huecos, _iconos, _idioma, _interruptor, _seleccion, _subsub, _temas
+if _edicion.con("anotar"):
+    from . import _anotar
+else:
+    _anotar = None
 from ._temas import CHICO_R
 from ._capas import Capas
 from ._diana import Diana
 from ._medidas import Medidas
 from ._navegador import Navegador
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.anillo")
+from ._ajustes import atributo, registro
 
+log = registro("anillo")
 TITULO = "Abrir la barra"
 ACCENT = QColor(240, 110, 40)          # el naranja de IngeTrazo
 TINTA = QColor(44, 44, 42)
+VERDE_CAPA = QColor(30, 150, 60)       # aislar y bloquear sin activar (activados: rojo)
+NARANJA_CAPA = QColor(240, 110, 40)    # hacer activa (como el lápiz del panel Capas)
 _TOL2 = 1e-8                           # (0,1 mm)² para reconocer los vértices
 _ICONO_SVG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "icons", "barra_dibujo.svg")
+                          "icons", "anillo.svg")
 
 # ---- Los botones y sus opciones ---------------------------------------------------
 BASES = ("rect", "poly", "arco", "circle")                       # arco interior
@@ -108,9 +114,10 @@ NOMBRES = {"rect": "Rectángulo", "poly": "Polígono regular", "arco": "Arco",
            "vistas": "Vistas y zoom: abre la diana debajo del anillo",
            "ojo": "Pasa por el ojo: se abre la rueda de vistas",
            "cerrar_app": "Cerrar IngeTrazo (pregunta si guardar)",
-           "apagar": "Apagar: salir de IngeTrazo · reiniciar IngeTrazo",
-           "historial": "Últimos comandos (pasa por el ojo amarillo)",
-           "ayuda": "Ayuda de Rosco LT (pasa por el ojo verde)",
+           "apagar": "Apagar: salir, reiniciar o apagar Rosco (en el anillo) · doble clic, apagar Rosco",
+           "historial": "Últimos comandos (se abren al pasar por el ojo)",
+           "texturas": "Biblioteca de texturas",
+           "ayuda": "Ayuda rápida: pasa por el ojo · clic: Opciones ▸ Ayuda",
            "preferencias": "Preferencias: de IngeTrazo · información del dibujo",
            "nav": "Navegador: grupos y componentes del modelo",
            **_diana.NOMBRES, **_seleccion.NOMBRES}
@@ -119,19 +126,49 @@ MODOS = {"rect": ("esquina", "centro", "lado", "girado"),
          "poly": ("centro", "lado"),
          "arco": ("arco", "3 puntos", "centro", "porción"),
          "circle": ("centro", "diámetro"),
-         "linea": ("línea", "guía", "equidist.", "paralela", "redondear"),
+         "linea": ("línea", "guía", "equidist.", "paralela", "contorno 3D", "mano alzada",
+                   "anotar", "borrar anotaciones"),
          "borrar": ("borrar", "ocultar"),
-         "seleccionar": ("ventana", "lazo"),
+         # Seleccionar: «ventana» es la selección normal de IngeTrazo (clic,
+         # ventana o captura) y «lazo», con el lazo.
+         # 1.4.0: «dentro»: el árbol del grupo bajo el ratón, la rueda elige
+         # el nivel y el clic abre los grupos hasta él y lo selecciona.
+         "seleccionar": ("ventana", "lazo", "dentro"),
          "pintar": ("pintar", "muestrear material"),
-         "medir": ("cota", "medir")}
+         "medir": ("medir", "cota", "ruta", "transportador"),
+         # 2.49.0: Empujar y Texto (botoncitos) también tienen subrosco.
+         "empujar": ("empujar/tirar", "sígueme", "redondear 3D", "puente"),
+         "texto": ("texto", "etiqueta", "texto 3D")}
+# Modos que son órdenes de IngeTrazo: ("tool", herramienta) o ("menu", textos).
+NATIVAS = {("empujar", "sígueme"): ("tool", "followme", ("Sígueme", "Follow Me")),
+           ("empujar", "puente"): ("menu", None, ("Puente", "Bridge")),
+           ("medir", "ruta"): ("tool", "geopath", ("Ruta", "Path")),
+           ("medir", "transportador"): ("tool", "protractor", ("Transportador", "Protractor")),
+           ("linea", "mano alzada"): ("tool", "freehand", ("Mano alzada", "Freehand")),
+           ("texto", "etiqueta"): ("tool", "text", ("Texto", "Text")),
+           ("texto", "texto 3D"): ("menu", None, ("Texto 3D…", "Texto 3D...", "Texto 3D",
+                                                  "3D Text…", "3D Text"))}
+MODOS = {k: _edicion.modos(k, v) for k, v in MODOS.items()}       # solo los de esta edición
 LIMITES_LADOS = {"poly": (3, 96), "circle": (6, 96)}
+# Seleccionar: «múltiple» y «quitar» no son modos sino interruptores
+# (``Cadena.sel_extra``); su texto en el subrosco y su color encendidos.
+SEL_EXTRA = ("múltiple", "quitar")
+TEXTO_MODO = {("seleccionar", "ventana"): "selección\nnormal",
+              ("seleccionar", "dentro"): "dentro de\ngrupos",
+              ("empujar", "empujar/tirar"): "empujar\n/ tirar",
+              ("empujar", "redondear 3D"): "redondear\n3D",
+              ("linea", "mano alzada"): "mano\nalzada",
+              ("linea", "borrar anotaciones"): "borrar\nanotaciones",
+              ("seleccionar", "múltiple"): "selección\nmúltiple",
+              ("seleccionar", "quitar"): "deselección\nmúltiple"}
+COLOR_SEL_EXTRA = {"múltiple": QColor(46, 158, 79), "quitar": QColor(214, 34, 34)}
 COLOR_GRUPO = {"grupo": QColor(214, 34, 34), "con nombre": QColor(214, 34, 34),
                "componente": QColor(24, 95, 165)}
 ETIQUETA_LADOS = {"poly": "Lados", "circle": "Segmentos"}
 
 # ---- Geometría del selector (píxeles) ----------------------------------------------
 # Un anillo partido alrededor del cursor: la mitad de arriba dibuja (bases
-# dentro, herramientas fuera) y la de abajo modifica (la barra de modificar dentro,
+# dentro, herramientas fuera) y la de abajo modifica (el arco de modificar dentro,
 # acciones de la selección fuera). Entre las dos mitades quedan unos grados
 # libres a cada lado: en el de la derecha va el ✕ de cerrar y, con la diana
 # plegada, en el de la izquierda el botón de las vistas. Los radios, el
@@ -155,9 +192,18 @@ ICONO_MODO = {
     ("arco", "centro"): "m_arco_centro", ("arco", "porción"): "m_porcion",
     ("circle", "centro"): "m_centro_circ", ("circle", "diámetro"): "m_diametro",
     ("linea", "línea"): "linea", ("linea", "guía"): "m_guia", ("linea", "equidist."): "m_equidist",
-    ("linea", "paralela"): "m_paralela", ("linea", "redondear"): "m_redondear",
+    ("linea", "paralela"): "m_paralela", ("linea", "contorno 3D"): "m_contorno3d",
+    ("linea", "mano alzada"): "m_mano", ("linea", "anotar"): "m_anotar",
+    ("linea", "borrar anotaciones"): "m_borrar_anot",
+    ("empujar", "empujar/tirar"): "m_empujar", ("empujar", "sígueme"): "m_sigueme",
+    ("empujar", "redondear 3D"): "m_redondear", ("empujar", "puente"): "m_puente",
+    ("texto", "texto"): "texto", ("texto", "etiqueta"): "m_etiqueta",
+    ("texto", "texto 3D"): "m_texto3d",
+    ("medir", "ruta"): "m_ruta", ("medir", "transportador"): "m_transportador",
     ("borrar", "borrar"): "borrar", ("borrar", "ocultar"): "ocultar",
-    ("seleccionar", "ventana"): "m_ventana", ("seleccionar", "lazo"): "m_lazo",
+    ("seleccionar", "ventana"): "seleccionar", ("seleccionar", "lazo"): "m_lazo",
+    ("seleccionar", "dentro"): "arbol",
+    ("seleccionar", "múltiple"): "m_sel_mas", ("seleccionar", "quitar"): "m_sel_menos",
     ("pintar", "pintar"): "pintar", ("pintar", "muestrear material"): "muestrear",
     ("fin", "nada"): "m_nada", ("fin", "grupo"): "grupo", ("fin", "componente"): "m_componente",
     ("fin", "con nombre"): "m_con_nombre",
@@ -186,6 +232,7 @@ TEXTO_ALINEAR = {"mover": "mover", "copiar": "copiar", "escalar": "escalar al 2.
 ICONO_ALINEAR = {"mover": "move", "copiar": "copiar", "escalar": "scale"}
 NOMBRES["align"] = "Alinear"
 NOMBRES["empujar"] = "Empujar / tirar"
+NOMBRES["texto"] = "Texto"                # su subrosco (2.49.2)
 # Las órdenes de edición a las que se les puede dictar la medida (Opciones).
 EDICION_CON_MEDIDA = {"move": "Desplazar", "rotate": "Rotar", "scale": "Escalar",
                       "pushpull": "Empujar / tirar", "vertices": "Vértices", "align": "Alinear"}
@@ -220,7 +267,7 @@ MENUS_SEL_X = 46.0                     # selección: el botón de menús, junto 
 # nombre; los de debajo son los de la selección (``_seleccion.CHICOS``). Con
 # la diana plegada se añaden deshacer y rehacer; con los cajetines plegados,
 # el Navegador y (con selección) las propiedades.
-CHICOS_BARRA_DIBUJO = {"notas": 118.0, "tiempo": 106.0, "pegar": 74.0, "pegar_sitio": 62.0}
+CHICOS_ANILLO = {"notas": 118.0, "tiempo": 106.0, "pegar": 74.0, "pegar_sitio": 62.0}
 CHICOS_DIANA = {"deshacer": 130.0, "rehacer": 50.0}
 CHICOS_CAJETINES = {"nav": 308.0, "propiedades": 232.0}
 # Las órdenes de los botoncitos (las atiende ``_accion_chico``, estén donde estén).
@@ -238,6 +285,11 @@ ORDENES_CHICAS = ("notas", "tiempo", "calc", "guardar", "copia", "texto",
 CHICOS_F = {"deshacer": 76.0, "opciones": 63.0, "limpia": 50.0, "apagar": 37.0, "calc": 24.0,
             "rehacer": 104.0, "buscar": 117.0, "preferencias": 130.0, "ext": 143.0, "bar": 156.0,
             "notas": 256.0, "tiempo": 284.0}
+PUNTO_R = 5.0                          # los puntos de los grupos (no escalan)
+PUNTO_R_ACTIVO = 7.5                   # el contorno del punto activo
+PUNTO_CONTORNO = 1.4
+PUNTO_PASO = 14.0                      # ancho de cada celda de clic
+PUNTO_ALTO = 22.0
 OJO_R = 13.0                           # los ojos (alto 2·OJO_R·0.7)
 # Los huecos de los lados (temas con ojos): entre la mitad de arriba y la de
 # abajo, a cada lado, uno en la banda de dentro y, en la de fuera, uno encima
@@ -249,11 +301,21 @@ LADOS_DEF = ("texto", "empujar", "notas", "guardar", "move", "copia", "")
 # El subrosco de la Cámara (botón del aro de la rueda): sale en lugar de ella.
 CAMARA_OPCIONES = {"situar_camara": "situar\ncámara", "caminar": "caminar",
                    "mirar_alrededor": "mirar\nalrededor"}
+# El subrosco del Plano de sección (clic derecho en su gajo de la rueda):
+# tres interruptores, las órdenes de IngeTrazo del menú Ver.
+SECCION_OPCIONES = {"planos": "mostrar\nplanos", "cortes": "mostrar\ncortes",
+                    "relleno": "relleno"}
+SECCION_ICONOS = {"planos": "m_planos_sec", "cortes": "m_cortes_sec", "relleno": "m_relleno_sec"}
+SECCION_MENU = {"planos": ("Planos de sección", "Section Planes"),
+                "cortes": ("Cortes de sección", "Section Cuts"),
+                "relleno": ("Relleno de sección", "Section Fill")}
+# Subroscos que salen en lugar de la rueda, en su mismo centro.
+OPCIONES_RUEDA = {"camara": CAMARA_OPCIONES, "seccion_sub": SECCION_OPCIONES}
 LADO_OJO = 8.0                         # grados que deja libres el ojo a cada lado
 # Los cuatro ojos: ángulo, dónde (al borde del anillo o entre los arcos
 # exteriores) y color del iris. De serie, el de arriba abre la rueda, el de
-# la izquierda (amarillo) el historial y el de la derecha (verde) la ayuda;
-# el de abajo no hace nada.
+# la izquierda (amarillo) el historial y el de la derecha (verde) abre la biblioteca de texturas;
+# el de abajo oculta el resto del modelo.
 OJOS = {"arriba": (90.0, "borde", QColor(55, 138, 221)),
         "abajo": (270.0, "borde", QColor(224, 52, 47)),
         "derecha": (0.0, "banda", QColor(47, 191, 107)),
@@ -264,96 +326,172 @@ INFO_MODELO = ("Info del modelo", "Model Info", "Información del modelo")
 HIST_MAX, HIST_W = 10, 170.0
 # Menús cuyas órdenes no se apuntan (vistas, cámara, zoom).
 HIST_SIN = ("vista", "view", "cámara", "camara", "camera", "zoom")
-# Los paneles que se abren al pasar por un ojo y salen a su lado.
-PANELES_OJO = ("historial", "ayuda")
-# La ayuda del ojo verde: apartados (título, texto) o (título, [(ojo, texto)]).
-AYUDA_W, AYUDA_MAX_H = 430.0, 730.0
-# La primera pestaña: los clics. Cada fila: (botón, veces, texto); botón «i»
-# izquierdo o «d» derecho; veces 1, 2 o 0 si es mantener pulsado.
-AYUDA_PESTANAS = ("Los clics", "Todo lo demás")
-AYUDA_ARRIBA, AYUDA_RATON = 52.0, 30.0   # donde empieza el texto; sitio para el ratoncito
-AYUDA_CLICS = (
-    ("Sin orden (Seleccionar)",
-     (("i", 1, "<b>Clic izquierdo</b> en vacío: abre el rosco; si hay selección, la quita (tras una orden, "
-               "vuelve el anillo con esa selección). En un objeto: lo selecciona y sale el anillo de selección. "
-               "Con un grupo abierto: dentro de su caja abre el rosco; fuera, cierra el grupo.", ("vacio", "objeto")),
-      ("i", 2, "<b>Doble clic izquierdo</b> en vacío: repite la última orden. En un grupo: entra a editarlo.", ("repite",)),
-      ("d", 1, "<b>Clic derecho</b>, en vacío o en un objeto: el menú de IngeTrazo. Con el rosco a la vista, "
-               "en vacío: un paso atrás (del submenú o la rueda al rosco; del rosco, Seleccionar y se esconde).",
-       ("menu", "alterna")),
-      ("d", 2, "<b>Doble clic derecho</b> en vacío: deshace el último cambio.", ("deshace",)))),
-    ("Sobre el rosco",
-     (("i", 1, "<b>Clic en un botón</b>: elige la orden y abre sus opciones.", ("boton",)),
-      ("i", 2, "<b>Doble clic en el centro</b>: repite la última orden.", ("repite",)),
-      ("d", 1, "<b>Clic derecho</b>: un paso atrás. En un submenú o en la rueda de vistas vuelve al rosco "
-               "principal; en el rosco principal, Seleccionar y el rosco se esconde.", ("boton",)),
-      ("i", 0, "<b>Mantener pulsado</b>: el rosco se vuelve transparente para ver el modelo y, al soltar, vuelve "
-               "donde esté el cursor. Sobre un botón, además escucha una orden de voz.", ("pulsado",)))),
-    ("Con una orden en marcha",
-     (("i", 1, "<b>Clic izquierdo</b>, en vacío o en un objeto: pone el siguiente punto. Nunca abre nada. "
-               "Al acabar, la orden sigue activa para otra vez.", ("punto",)),
-      ("i", 2, "<b>Doble clic izquierdo</b>: cancela la orden. Descarta lo que estaba a medias; "
-               "lo terminado se queda.", ("cancela",)),
-      ("d", 1, "<b>Clic derecho</b>: termina la orden, conserva lo hecho (lo que cuelga del ratón "
-               "se suelta) y abre el rosco con el submenú de esa orden. Otro clic derecho: al rosco "
-               "principal; otro más: Seleccionar. Con una orden de editar, encima de un objeto: "
-               "termina y sale el menú de IngeTrazo.", ("termina",)),
-      ("d", 2, "<b>Doble clic derecho</b>: un paso atrás. Quita lo último y sigues en la orden.", ("atras",)))),
-)
-AYUDA_ESCENAS = tuple(dict.fromkeys(e for _t, filas in AYUDA_CLICS for fila in filas for e in fila[3]))
-ANIMA_ALTO = 130.0                     # la pantallita animada de la pestaña de clics
-# La segunda pestaña: apartados (título, texto) o (título, [(ojo, texto)]).
-AYUDA = (
-    ("Moverse y parar",
-     "Al mover el ratón, el anillo va con el cursor. Al pararte se queda fijo y ya puedes "
-     "hacer clic en sus botones. Si te alejas, vuelve a seguirte."),
-    ("Arriba: dibujar",
-     "Fuera: línea, rectángulo, círculo, polígono y arco. Dentro: medir, seleccionar y "
-     "pintar. Un clic elige la herramienta y abre sus opciones a la derecha del cursor "
-     "(lados, modo, «al terminar»…)."),
-    ("Abajo: modificar lo seleccionado",
-     "Dentro: suprimir, simetría, escalar y rotar. Fuera: borrar, copiar, cortar, pegar, "
-     "pegar en su sitio, crear grupo, bloquear, ocultar e invertir cara."),
-    ("Los ojos (se abren pasando el ratón por encima)",
-     [("arriba", "Azul: la rueda de vistas (zoom, vistas estándar, cónica/paralela, plano de "
-                 "sección, cámara, ocultar…)."),
-      ("izquierda", "Amarillo: los 10 últimos comandos."),
-      ("derecha", "Verde: esta ayuda."),
-      ("abajo", "Rojo: ocultar el resto del modelo (otro clic lo vuelve a mostrar).")]),
-    ("Los botoncitos del borde",
-     "Deshacer y rehacer, opciones, pantalla limpia, buscar (con la barra quieta, teclea para "
-     "buscar una orden; con un clic, los menús de IngeTrazo en árbol), preferencias, gestor de "
-     "barras, extensiones, apagar y calculadora. A la izquierda: texto, empujar/tirar y notas "
-     "(con el reloj en «Tareas del modelo»); a la derecha: guardar, desplazar y copia "
-     "con nombre y comentario. Todos los huecos se cambian en el gestor de barras ▸ "
-     "Barra Rosco LT."),
-    ("La casilla de medidas",
-     "Sale junto al lápiz tras cada punto. Teclea la medida (admite cuentas, como 120/2) o díctala "
-     "con el micrófono: rojo mientras escucha. La V acepta, el retroceso borra una cifra y el aspa "
-     "toda la casilla."),
-    ("Con el teclado",
-     "Esc cancela la orden o cierra el panel abierto. Ctrl+Alt+R reinicia IngeTrazo."),
-    ("Ajustes",
-     "En Opciones: idioma, tema de la barra, tamaño, distancia del cursor al submenú, tamaño del "
-     "rosco de submenús, dictado de medidas tras el primer punto, qué hacer al terminar una orden, "
-     "fijar la barra con la chincheta y desactivar Rosco LT."),
-)
+# Los paneles que se abren al pasar por un ojo y salen a su lado. Sin la
+# biblioteca de texturas, su ojo es la Ayuda rápida (también al pasar).
+PANELES_OJO = ("historial",)
+if not _edicion.con("texturas") and _edicion.con("panel_ayuda"):
+    PANELES_OJO = ("historial", "ayuda")
+AYUDA_RAPIDA_W = 270.0                 # el panel de la Ayuda rápida
+# Las filas de la Ayuda rápida: las principales de la ayuda de los clics.
+AYUDA_RAPIDA = ("<b>Clic en un botón</b>", "<b>Clic derecho en un botón</b>", "<b>Doble clic en el centro</b>",
+                "<b>Clic derecho</b> en vacío", "<b>Doble clic derecho</b>: deshace", "<b>Mantener pulsado</b>")
+_ULTIMA: list = []                     # la última barra creada (para ``ojo_de``)
+
+
+def ojo_de(funcion):
+    """El ojo que lleva ``funcion`` en la barra, o None (para la ayuda)."""
+    try:
+        return _ULTIMA[0].huecos.ojo_de(funcion) if _ULTIMA else None
+    except Exception:  # noqa: BLE001
+        return None
 # Lo que el doble clic en el vacío se salta al repetir la última orden.
 NO_REPETIR = {"seleccionar", "select", "deshacer", "rehacer", "undo", "redo",
               NOMBRES["seleccionar"].split(":")[0].strip().lower()}
 NOMBRES_CHICOS = {"notas": "Tareas",
+                  "sel_rapida": "Selección rápida (por tipo o por medida)",
                   "tiempo": "Control de tiempo", "calc": "Calculadora",
                   "guardar": "Guardar el dibujo",
                   "copia": "Guardar una copia (con nombre y comentario)",
                   "texto": "Texto",
                   "opciones": "Opciones", "pegar": "Pegar",
                   "pegar_sitio": "Pegar en su sitio"}
-# El lápiz del cursor según la herramienta de la barra de dibujo.
+# El lápiz del cursor según la herramienta del anillo.
 FORMA_LAPIZ = {"rect": "rect", "poly": "poly", "arco": "arco", "circle": "circulo",
                "linea": "linea", "borrar": "borrar", "seleccionar": "seleccionar",
                "medir": "medir"}
 PROPS_W, PROPS_H = 250.0, 38.0         # el extracto de propiedades (selección)
 CAPA_HUECO = 8.0                       # entre la pastilla y lo que tiene al lado
+CAPA_REF_W = 180.0                     # el cajetín de capa se dibuja a este ancho y se escala
+# La vista previa del subrosco al pasar por su botón (2.48.3): tamaño,
+# transparencia y separación del botón.
+PREVIA_ESC, PREVIA_OPACA, PREVIA_HUECO = 0.60, 0.82, 6.0
+# Desde la 2.50.0 la vista previa es el subrosco de verdad, pegado a su
+# botón: su tamaño y lo que espera para cerrarse al salir del botón y de él.
+PEGADO_ESC, PEGADO_CIERRE_MS = 0.75, 300
+# El rosco de dos anillos, sin subroscos (Rosco 1.0.0). Dentro, siete
+# botones; fuera, quince y los ojos amarillo (izquierda) y verde (derecha),
+# a la misma altura. Las opciones de un botón salen en su mismo anillo, en
+# los huecos que le siguen (en el sentido del reloj), saltándose los ojos.
+# 1.2.0: dentro, las de modificar; fuera, arriba las de dibujar (Medir la
+# primera) y abajo, de derecha a izquierda, Guardar … Pintar.
+ANILLO_DENTRO = ("seleccionar", "suprimir", "flip", "scale", "rotate", "empujar", "move")
+ANILLO_FUERA = ("", "medir", "linea", "rect", "circle", "poly", "arco", "texto",
+                "", "guardar", "bloquear", "ocultar", "agrupar", "invertir", "portapapeles", "borrar", "pintar")
+# Botones cuyas opciones salen al revés (contra el reloj), para no pasar al
+# otro lado del ojo.
+HACIA_ATRAS = frozenset({"pintar", "texto", "arco", "portapapeles"})
+PASO_FUERA = 360.0 / len(ANILLO_FUERA)
+PASO_DENTRO = 360.0 / len(ANILLO_DENTRO)
+OJO_IZQ_A = 180.0 - (180.0 - 8 * PASO_FUERA) / 2.0     # el ojo amarillo, algo por encima
+OJO_DER_A = OJO_IZQ_A - 8 * PASO_FUERA                  # el verde, en espejo
+OJOS["izquierda"] = (OJO_IZQ_A, "banda", OJOS["izquierda"][2])
+OJOS["derecha"] = (OJO_DER_A, "banda", OJOS["derecha"][2])
+# Botones que juntan varias órdenes: (orden, texto, icono); el clic en el
+# botón repite la última usada.
+UNIDOS = {"portapapeles": (("copiar", "copiar", "copiar"), ("cortar", "cortar", "cortar"),
+                           ("pegar", "pegar", "pegar"), ("pegar_sitio", "pegar en el sitio", "pegar_sitio")),
+          "guardar": (("guardar", "guardar", "guardar"), ("copia", "guardar copia", "copia"))}
+UNIDOS_DEF = {"portapapeles": "copiar", "guardar": "guardar"}
+# 1.11.1: la orden propia de cada botón unido (la hace su clic; no se
+# repite en su subbarra).
+UNIDOS_PROPIA = {"portapapeles": "pegar", "guardar": "guardar"}
+NOMBRES["portapapeles"] = "Copiar · cortar · pegar"
+NOMBRES_CHICOS["guardar"] = "Guardar · guardar copia"
+NOMBRES["texto"] = "Texto: texto · etiqueta · texto 3D · notas"
+DESPLIEGUE_MS = 300                    # parado sobre un botón: salen sus opciones
+# 1.8.0: clic derecho que se hace al soltar, sin esperar al doble clic (si
+# llega otro, se quita y se deshace). Con una orden o el menú de IngeTrazo,
+# se sigue esperando: no se pueden quitar.
+DERECHO_AL_MOMENTO = ("rosco", "subsel", "atras", "seleccionar")
+ROTULOS_FUERA = False                  # los nombres de las opciones, por fuera del anillo (1.0.0)
+GRIS_DESPLIEGUE = QColor(150, 150, 150, 165)    # los demás botones, con las opciones abiertas
+ROSA_DESPLIEGUE = QColor(255, 196, 214, 235)    # el fondo de las opciones (1.6.0: más fuerte)
+# 1.7.0: las opciones que complementan la orden (cómo acaba o cómo actúa), en
+# verde claro; la que está puesta, en un verde algo más fuerte.
+VERDE_COMPLEMENTO = QColor(196, 238, 200, 240)
+VERDE_COMPLEMENTO_ACTIVO = QColor(140, 212, 150, 250)
+COMPLEMENTOS = {("flip", "copia"), ("rotate", "con copia"), ("move", "copia"), ("scale", "por referencia")}
+
+
+# 1.11.0: las subbarras personalizadas en el gestor de barras (``_anillos2``): la
+# lista de cada botón ``[(tipo, valor)]`` y cuáles van en verde.
+SUB_PROPIA: dict = {}
+VERDES_PROPIOS: dict = {}
+OJOS_FUERA = (0, 8)                    # los ojos amarillo y verde en el anillo de fuera
+
+
+def es_complemento_base(clave, tipo, valor) -> bool:
+    return tipo in ("fin", "seccion", "limpia") or (clave, valor) in COMPLEMENTOS
+
+
+def es_complemento(clave, tipo, valor) -> bool:
+    if clave in VERDES_PROPIOS:
+        return valor in VERDES_PROPIOS[clave]
+    return es_complemento_base(clave, tipo, valor)
+
+
+def pintar_icono_opcion(painter, icono, q, lado) -> None:
+    """El icono de una opción, lo más grande que quepa en su hueco (1.7.0:
+    sin disco)."""
+    from . import _iconos
+    if icono and _iconos.tiene(icono):
+        _iconos.pintar(painter, icono, q, lado)
+SONIDO_DESPLIEGUE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sonidos", "tic.wav")
+
+
+def _envolvente(puntos) -> QPolygonF:
+    """El polígono convexo más pequeño que encierra ``puntos`` ``[(x, y)]``."""
+    pts = sorted(set(puntos))
+    if len(pts) < 3:
+        return QPolygonF([QPointF(x, y) for x, y in pts])
+
+    def giro(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    abajo, arriba = [], []
+    for q in pts:
+        while len(abajo) >= 2 and giro(abajo[-2], abajo[-1], q) <= 0:
+            abajo.pop()
+        abajo.append(q)
+    for q in reversed(pts):
+        while len(arriba) >= 2 and giro(arriba[-2], arriba[-1], q) <= 0:
+            arriba.pop()
+        arriba.append(q)
+    return QPolygonF([QPointF(x, y) for x, y in abajo[:-1] + arriba[:-1]])
+
+
+def _primera_frase(texto: str) -> str:
+    """La primera frase de un texto ya traducido (hasta el primer punto)."""
+    import re as _re
+    m = _re.match(r"^(.*?[.。।])(\s|$)", texto, _re.S)
+    return m.group(1) if m else texto
+
+
+def sonar_despliegue() -> None:
+    """Un «tic» corto al abrirse las opciones de un botón (sin esperar)."""
+    if not os.path.isfile(SONIDO_DESPLIEGUE):
+        return
+    try:
+        import ctypes
+        # SND_ASYNC | SND_NODEFAULT | SND_FILENAME
+        ctypes.windll.winmm.PlaySoundW(SONIDO_DESPLIEGUE, None, 0x0001 | 0x0002 | 0x00020000)
+    except Exception:  # noqa: BLE001
+        log.debug("no se pudo sonar el tic", exc_info=True)
+
+
+class _Todo:
+    """Una forma que lo contiene todo (para elegir una opción sin su gajo)."""
+
+    @staticmethod
+    def contains(_p) -> bool:
+        return True
+TEXTOS_CAPA = {
+    "capa": "Capa activa · clic: la lista de capas",
+    "capa_aplicar": ("Aplicar capa: apagado · clic para encender",
+                     "Aplicar capa: encendido · clic para apagar"),
+    "capa_activa": "Cuentagotas: hacer activa la capa de lo seleccionado o de lo que pinches",
+    "capa_aislar": "Aislar capa · otro clic: verlas todas",
+    "capa_bloq": "Bloquear o desbloquear la capa",
+}
 POSICIONES_CAPA = ("abajo", "arriba", "izquierda")   # bajo el anillo / buscador / izquierda
 # La ventanita: rótulo, buscador, diana y la mitad de dibujar encima; la de
 # modificar, la capa y el submenú debajo.
@@ -362,62 +500,72 @@ ANCLA_LOCAL = QPointF(350.0, 390.0)
 SINCRONIA_MS = 150                     # repaso de visibilidad sin mover el ratón
 REPOSO_MS = 300                        # ratón parado este tiempo: la barra se fija
 
-TIP = ("Rosco LT: dibuja una base (rectángulo, polígono, arco, círculo o "
+TIP = ("Rosco: dibuja una base (rectángulo, polígono, arco, círculo o "
        "línea) y, sin soltar la orden, Empujar/Tirar su cara.")
 MSG = {
-    ("rect", "esquina"): "Rosco LT · rectángulo: clic en una esquina y en la "
+    ("rect", "esquina"): "Rosco · rectángulo: clic en una esquina y en la "
                          "opuesta (o teclea ancho;alto + Enter).",
-    ("rect", "centro"): "Rosco LT · rectángulo desde el centro: clic en el centro "
+    ("rect", "centro"): "Rosco · rectángulo desde el centro: clic en el centro "
                         "y en una esquina (o teclea ancho;alto + Enter).",
-    ("rect", "lado"): "Rosco LT · rectángulo por lado: dos clics para un lado "
+    ("rect", "lado"): "Rosco · rectángulo por lado: dos clics para un lado "
                       "(va por los ejes) y un tercero para el fondo.",
-    ("rect", "girado"): "Rosco LT · rectángulo girado: dos clics para un lado en "
+    ("rect", "girado"): "Rosco · rectángulo girado: dos clics para un lado en "
                         "cualquier dirección y un tercero para el fondo.",
-    ("poly", "centro"): "Rosco LT · polígono: clic en el centro y en un vértice "
+    ("poly", "centro"): "Rosco · polígono: clic en el centro y en un vértice "
                         "(o teclea el radio + Enter).",
-    ("poly", "lado"): "Rosco LT · polígono por lado: clic en los dos extremos de "
+    ("poly", "lado"): "Rosco · polígono por lado: clic en los dos extremos de "
                       "una arista (o teclea su longitud + Enter). Crece a la "
                       "izquierda de la arista.",
-    ("line", None): "Rosco LT · polilínea: clic en cada punto; cierra en el primero.",
-    ("circle", "centro"): "Rosco LT · círculo: clic en el centro y en el borde "
+    ("line", None): "Rosco · polilínea: clic en cada punto; cierra en el primero.",
+    ("circle", "centro"): "Rosco · círculo: clic en el centro y en el borde "
                           "(o teclea el radio + Enter).",
-    ("circle", "diámetro"): "Rosco LT · círculo por diámetro: clic en dos puntos "
+    ("circle", "diámetro"): "Rosco · círculo por diámetro: clic en dos puntos "
                             "opuestos (o teclea el diámetro + Enter).",
-    ("linea", "línea"): "Rosco LT · línea: clic en cada punto; si cierras un "
+    ("linea", "línea"): "Rosco · línea: clic en cada punto; si cierras un "
                         "contorno, pasa a la altura.",
-    ("linea", "guía"): "Rosco LT · línea guía: clic en dos puntos por los que "
+    ("linea", "guía"): "Rosco · línea guía: clic en dos puntos por los que "
                        "pasa la guía.",
-    ("linea", "equidist."): "Rosco LT · equidistancia: clic en una cara (o en una "
+    ("linea", "equidist."): "Rosco · equidistancia: clic en una cara (o en una "
                             "polilínea), arrastra o teclea la distancia.",
-    ("linea", "paralela"): "Rosco LT · paralela: clic en un segmento o en una línea "
+    ("linea", "paralela"): "Rosco · paralela: clic en un segmento o en una línea "
                            "abierta, lleva el ratón al lado y haz clic o teclea "
                            "la distancia.",
-    ("linea", "redondear"): "Rosco LT · redondear 3D: clic en una arista (o usa las "
+    ("linea", "contorno 3D"): "Rosco · contorno 3D: elige las aristas del perímetro (clic "
+                              "en ellas) y, con el ratón sobre una cara del lado, clic o "
+                              "teclea la distancia.",
+    ("empujar", "redondear 3D"): "Rosco · redondear 3D: clic en una arista (o usa las "
                             "seleccionadas), aleja el ratón o teclea el radio.",
-    ("arco", "arco"): "Rosco LT · arco: clic en los dos extremos y luego en la "
+    ("arco", "arco"): "Rosco · arco: clic en los dos extremos y luego en la "
                       "flecha (o tecléala).",
-    ("arco", "3 puntos"): "Rosco LT · arco por 3 puntos: inicio, un punto del arco "
+    ("arco", "3 puntos"): "Rosco · arco por 3 puntos: inicio, un punto del arco "
                           "y final.",
-    ("arco", "centro"): "Rosco LT · arco por centro: centro, inicio del arco y "
+    ("arco", "centro"): "Rosco · arco por centro: centro, inicio del arco y "
                         "ángulo final.",
-    ("arco", "porción"): "Rosco LT · porción: centro, inicio y ángulo final; la "
+    ("arco", "porción"): "Rosco · porción: centro, inicio y ángulo final; la "
                          "porción pasa a la altura.",
-    ("medir", "cota"): "Rosco LT · cota: clic en dos puntos y en la posición de la "
+    ("medir", "cota"): "Rosco · cota: clic en dos puntos y en la posición de la "
                        "línea de cota.",
-    ("medir", "medir"): "Rosco LT · medir: clic en dos puntos (desde una arista "
+    ("medir", "medir"): "Rosco · medir: clic en dos puntos (desde una arista "
                         "deja una guía).",
-    ("borrar", "borrar"): "Rosco LT · borrar: clic o arrastra sobre aristas u "
+    ("borrar", "borrar"): "Rosco · borrar: clic o arrastra sobre aristas u "
                           "objetos para borrarlos.",
-    ("borrar", "ocultar"): "Rosco LT · ocultar: clic o arrastra sobre aristas u "
+    ("borrar", "ocultar"): "Rosco · ocultar: clic o arrastra sobre aristas u "
                            "objetos para ocultarlos.",
-    ("seleccionar", "ventana"): "Rosco LT · seleccionar: clic, o arrastra una "
+    ("seleccionar", "ventana"): "Rosco · seleccionar: clic, o arrastra una "
                                 "ventana (izq.→der.) o captura (der.→izq.).",
-    ("seleccionar", "lazo"): "Rosco LT · seleccionar con lazo: arrastra rodeando "
+    ("seleccionar", "lazo"): "Rosco · seleccionar con lazo: arrastra rodeando "
                              "lo que quieras (Ctrl añade, Mayús alterna).",
+    ("seleccionar", "dentro"): "Rosco · seleccionar dentro de grupos: pasa por un grupo, "
+                               "elige el nivel con la rueda y haz clic (abre los grupos hasta él).",
 }
+# Los textos que se enseñan, sin nada de las partes que esta edición no lleva.
+NOMBRES, NOMBRES_CHICOS, TEXTO_MODO, ICONO_MODO, NATIVAS, TEXTOS_CAPA, MSG = (
+    _edicion.limpiar(NOMBRES), _edicion.limpiar(NOMBRES_CHICOS), _edicion.limpiar(TEXTO_MODO),
+    _edicion.limpiar(ICONO_MODO), _edicion.limpiar(NATIVAS), _edicion.limpiar(TEXTOS_CAPA),
+    _edicion.limpiar(MSG))
 MSG_ALTURA = ("Altura: mueve el ratón y haz clic, o teclea la medida + Enter. "
               "Esc = dejarla plana.")
-MSG_ESPERA = ("Rosco LT: para el ratón y elige una herramienta en la barra. Un clic "
+MSG_ESPERA = ("Rosco: para el ratón y elige una herramienta en la barra. Un clic "
               "fuera de la barra (o Esc) la cierra.")
 
 
@@ -545,7 +693,7 @@ class _BaseCadena:
 
 class RectanguloCadena(_BaseCadena, RectangleTool):
     clave = "rect"
-    name = "Rosco LT · rectángulo"
+    name = con_nombre("Rosco · rectángulo")
     description = "Draw a rectangle; its face goes straight to Push/Pull."
 
     def __init__(self, cadena) -> None:
@@ -568,7 +716,7 @@ class GiradoCadena(_BaseCadena, RotatedRectangleTool):
     """Rectángulo de tres clics: un lado y el fondo. En modo «lado» el primer
     lado va por los ejes del plano de dibujo; en «girado», donde sea."""
     clave = "rect"
-    name = "Rosco LT · rectángulo por lado"
+    name = con_nombre("Rosco · rectángulo por lado")
     icon = "rotated_rect"
 
     def __init__(self, cadena) -> None:
@@ -688,7 +836,7 @@ class _RadialCadena(_BaseCadena):
 
 class PoligonoCadena(_RadialCadena, PolygonTool):
     clave = "poly"
-    name = "Rosco LT · polígono"
+    name = con_nombre("Rosco · polígono")
     icon = "polygon"
 
     def __init__(self, cadena) -> None:
@@ -698,7 +846,7 @@ class PoligonoCadena(_RadialCadena, PolygonTool):
 
 class CirculoCadena(_RadialCadena, CircleTool):
     clave = "circle"
-    name = "Rosco LT · círculo"
+    name = con_nombre("Rosco · círculo")
     icon = "circle"
 
     def __init__(self, cadena) -> None:
@@ -709,7 +857,7 @@ class CirculoCadena(_RadialCadena, CircleTool):
 class LineaCadena(_BaseCadena, LineTool):
     """Polilínea: al cerrarse en su primer punto, su cara pasa a la altura."""
     clave = "line"
-    name = "Rosco LT · polilínea"
+    name = con_nombre("Rosco · polilínea")
     icon = "line"
 
     def __init__(self, cadena) -> None:
@@ -741,13 +889,13 @@ class LineaCadena(_BaseCadena, LineTool):
 class LineaLibreCadena(LineaCadena):
     """El botón Línea: líneas encadenadas; si cierran una cara, a la altura."""
     clave = "linea"
-    name = "Rosco LT · línea"
+    name = con_nombre("Rosco · línea")
 
 
 class GuiaCadena(_BaseCadena, LineTool):
     """Línea guía (de construcción) por dos puntos, como las de la cinta."""
     clave = "linea"
-    name = "Rosco LT · línea guía"
+    name = con_nombre("Rosco · línea guía")
     icon = "tape"
 
     def __init__(self, cadena) -> None:
@@ -788,17 +936,100 @@ class GuiaCadena(_BaseCadena, LineTool):
 class BorradorCadena(_BaseCadena, EraserTool):
     """El borrador nativo; en modo «ocultar», como con Mayús: oculta."""
     clave = "borrar"
-    name = "Rosco LT · borrar"
+    name = con_nombre("Rosco · borrar")
     icon = "eraser"
 
     def __init__(self, cadena) -> None:
         EraserTool.__init__(self)
         self.cadena = cadena
+        self._arbol = None                    # la ventanita del árbol (2.49.0)
+        self._bajo = ([], None)               # (grupos, cara) bajo el ratón
+        self._nivel = 0
+        self._filtro_rueda = None
+
+    # -- borrar dentro de grupos: el árbol junto al ratón --
+    def on_activate(self, viewport) -> None:
+        super().on_activate(viewport)
+        if self._filtro_rueda is None:
+            self._filtro_rueda = _FiltroRueda(self)
+        viewport.installEventFilter(self._filtro_rueda)
+
+    def on_deactivate(self, viewport) -> None:
+        if self._filtro_rueda is not None:
+            viewport.removeEventFilter(self._filtro_rueda)
+        self._quitar_arbol()
+        super().on_deactivate(viewport)
+
+    def _quitar_arbol(self) -> None:
+        self._bajo = ([], None)
+        if self._arbol is not None:
+            self._arbol.hide()
+
+    def _mirar_arbol(self, viewport, screen) -> None:
+        if not _edicion.con("arbol_borrar"):
+            return
+        from . import _arbol_borrar as AB
+        if (self._stroke or self.cadena.modo["borrar"] != "borrar"
+                or getattr(viewport.scene, "edit_group", None) is not None):
+            self._quitar_arbol()
+            return
+        grupos, cara = AB.cadena_bajo(viewport, screen.x(), screen.y())
+        if not grupos:
+            self._quitar_arbol()
+            return
+        antes = self._bajo[0]
+        if not antes or antes[0] is not grupos[0]:
+            self._nivel = 0                   # otro grupo: por defecto, el grupo entero
+        self._bajo = (grupos, cara)
+        filas = AB.filas(grupos, cara)
+        self._nivel = min(self._nivel, len(filas) - 1)
+        if len(filas) < 2:                    # un grupo sin nada dentro: no hace falta árbol
+            if self._arbol is not None:
+                self._arbol.hide()
+            return
+        if self._arbol is None:
+            self._arbol = AB.ArbolBorrar(self.cadena.app.window)
+        pos = viewport.mapToGlobal(QPoint(round(screen.x()) + 22, round(screen.y()) + 16))
+        self._arbol.mostrar(filas, self._nivel, pos)
+
+    def rueda(self, viewport, pasos: int) -> bool:
+        """La rueda con el árbol a la vista: baja o sube de nivel (no hace zoom)."""
+        if (self._arbol is None or not self._arbol.isVisible() or not self._bajo[0]
+                or not _edicion.con("arbol_borrar")):
+            return False
+        from . import _arbol_borrar as AB
+        n = len(AB.filas(*self._bajo))
+        self._nivel = max(0, min(n - 1, self._nivel + pasos))
+        pos = self._arbol.pos()
+        self._arbol.mostrar(AB.filas(*self._bajo), self._nivel, pos)
+        return True
+
+    def on_hover(self, ctx: ToolContext) -> None:
+        super().on_hover(ctx)
+        try:
+            self._mirar_arbol(ctx.viewport, ctx.screen)
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo mirar el árbol de Borrar")
+            self._quitar_arbol()
 
     def on_click(self, ctx: ToolContext) -> None:
         if (not self._stroke
                 and self.cadena.clic_en_selector(ctx.viewport, ctx.screen)):
             return
+        grupos, cara = self._bajo
+        if (not self._stroke and self._nivel > 0 and grupos
+                and self.cadena.modo["borrar"] == "borrar" and _edicion.con("arbol_borrar")):
+            from . import _arbol_borrar as AB
+            try:
+                if AB.borrar(ctx.viewport, grupos, cara, self._nivel):
+                    ctx.viewport.flash_status(_tr("Borrado dentro del grupo. Ctrl+Z lo recupera."), 3000)
+            except Exception:  # noqa: BLE001
+                log.exception("no se pudo borrar dentro del grupo")
+                ctx.viewport.flash_status(_tr("No se pudo borrar eso dentro del grupo."), 4000)
+            self._nivel = 0
+            self._quitar_arbol()
+            return
+        self._quitar_arbol()
         EraserTool.on_click(self, ctx)
         if self.cadena.modo["borrar"] == "ocultar" and not self._hide:
             from core.group import Group
@@ -808,19 +1039,159 @@ class BorradorCadena(_BaseCadena, EraserTool):
             self.marked = {m for m in self.marked if isinstance(m, (Edge, Group))}
 
 
+class _FiltroRueda(QObject):
+    """Borrar: con el árbol a la vista, la rueda elige el nivel."""
+
+    def __init__(self, herramienta) -> None:
+        super().__init__()
+        self.h = herramienta
+
+    def eventFilter(self, obj, ev) -> bool:  # noqa: N802
+        if ev.type() == QEvent.Type.Wheel:
+            d = ev.angleDelta().y()
+            if d:
+                return self.h.rueda(obj, 1 if d < 0 else -1)
+        return False
+
+
+class _SinParte:
+    """Base vacía en lugar de la de una parte que esta edición no lleva."""
+
+
+class AnotarCadena(_BaseCadena, _anotar.Anotar if _anotar is not None else _SinParte, Tool):
+    """Línea ▸ anotar · borrar anotaciones (``_anotar``)."""
+    clave = "linea"
+
+    def __init__(self, cadena) -> None:
+        self.cadena = cadena
+        self._iniciar()
+
+    def modo_borrar(self) -> bool:
+        return self.cadena.modo.get("linea") == "borrar anotaciones"
+
+    def on_hover(self, ctx: ToolContext) -> None:
+        self.cadena.cursor_movido(ctx.screen, self)
+
+    def on_click(self, ctx: ToolContext) -> None:
+        pass                                  # lo hace su filtro (arrastrar)
+
+    def on_cancel(self, viewport) -> None:
+        _anotar.Anotar.on_cancel(self, viewport)
+
+
 class SeleccionCadena(_BaseCadena, SelectTool):
     """Seleccionar nativo; en modo «lazo», la ventana la sustituye el lazo
     que dibuja la cadena (``Cadena._lazo``)."""
     clave = "seleccionar"
-    name = "Rosco LT · seleccionar"
+    name = con_nombre("Rosco · seleccionar")
 
     def __init__(self, cadena) -> None:
         SelectTool.__init__(self)
         self.cadena = cadena
+        self._arbol = None                    # «dentro de grupos» (1.4.0): el árbol
+        self._bajo = ([], None)               # (grupos, cara) bajo el ratón
+        self._nivel = 0
+        self._filtro_rueda = None
 
     @property
     def box_select(self):                      # type: ignore[override]
         return self.cadena.modo["seleccionar"] == "ventana"
+
+    # -- seleccionar dentro de grupos: el árbol junto al ratón, como Borrar --
+    def _dentro(self) -> bool:
+        return self.cadena.modo.get("seleccionar") == "dentro"
+
+    def on_activate(self, viewport) -> None:
+        super().on_activate(viewport)
+        if self._filtro_rueda is None:
+            self._filtro_rueda = _FiltroRueda(self)
+        viewport.installEventFilter(self._filtro_rueda)
+
+    def on_deactivate(self, viewport) -> None:
+        if self._filtro_rueda is not None:
+            viewport.removeEventFilter(self._filtro_rueda)
+        self._quitar_arbol()
+        super().on_deactivate(viewport)
+
+    def _quitar_arbol(self) -> None:
+        self._bajo = ([], None)
+        if self._arbol is not None:
+            self._arbol.hide()
+
+    def _mirar_arbol(self, viewport, screen) -> None:
+        if not _edicion.con("arbol_borrar"):
+            return
+        from . import _arbol_borrar as AB
+        if not self._dentro():
+            self._quitar_arbol()
+            return
+        grupos, cara = AB.cadena_bajo(viewport, screen.x(), screen.y())
+        if not grupos:
+            self._quitar_arbol()
+            return
+        # Con grupos ya abiertos, el árbol empieza en el de arriba del todo.
+        ya = AB.abiertos(viewport.scene)
+        grupos = ya + list(grupos)
+        antes = self._bajo[0]
+        if not antes or antes[-1] is not grupos[-1] or len(antes) != len(grupos):
+            self._nivel = len(ya)             # por defecto, el primer grupo cerrado
+        self._bajo = (grupos, cara)
+        filas = AB.filas(grupos, cara, AB.NIVELES_SEL)
+        self._nivel = min(self._nivel, len(filas) - 1)
+        if self._arbol is None:
+            self._arbol = AB.ArbolBorrar(self.cadena.app.window, "rueda: nivel · clic: seleccionar")
+        pos = viewport.mapToGlobal(QPoint(round(screen.x()) + 22, round(screen.y()) + 16))
+        self._arbol.mostrar(filas, self._nivel, pos)
+
+    def rueda(self, viewport, pasos: int) -> bool:
+        """La rueda con el árbol a la vista: baja o sube de nivel (no hace zoom)."""
+        if (self._arbol is None or not self._arbol.isVisible() or not self._bajo[0]
+                or not _edicion.con("arbol_borrar")):
+            return False
+        from . import _arbol_borrar as AB
+        filas = AB.filas(*self._bajo, AB.NIVELES_SEL)
+        self._nivel = max(0, min(len(filas) - 1, self._nivel + pasos))
+        self._arbol.mostrar(filas, self._nivel, self._arbol.pos())
+        return True
+
+    def on_hover(self, ctx: ToolContext) -> None:
+        super().on_hover(ctx)
+        try:
+            self._mirar_arbol(ctx.viewport, ctx.screen)
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo mirar el árbol de Seleccionar")
+            self._quitar_arbol()
+
+    # Selección o deselección múltiple (interruptores del subrosco): cada clic
+    # o ventana añade (como Ctrl) o quita (como Ctrl+Mayús), sin teclas.
+    _TECLAS_EXTRA = {"múltiple": Qt.ControlModifier,
+                     "quitar": Qt.ControlModifier | Qt.ShiftModifier}
+
+    def on_click(self, ctx: ToolContext):
+        grupos, cara = self._bajo
+        if self._dentro() and grupos and _edicion.con("arbol_borrar"):
+            from . import _arbol_borrar as AB
+            try:
+                if AB.seleccionar_dentro(ctx.viewport, grupos, cara, self._nivel):
+                    ctx.viewport.flash_status(_tr("Seleccionado dentro de sus grupos (Esc los cierra)."), 3000)
+            except Exception:  # noqa: BLE001
+                log.exception("no se pudo seleccionar dentro del grupo")
+                ctx.viewport.flash_status(_tr("No se pudo seleccionar eso dentro del grupo."), 4000)
+            self._nivel = 0
+            self._quitar_arbol()
+            return None
+        extra = self._TECLAS_EXTRA.get(getattr(self.cadena, "sel_extra", None))
+        if extra is not None:
+            ctx = ToolContext(ctx.viewport, ctx.world, ctx.screen, extra, ctx.snap)
+        return SelectTool.on_click(self, ctx)
+
+    def on_box_select(self, viewport, rect, crossing, additive=False, mode=None):
+        extra = getattr(self.cadena, "sel_extra", None)
+        if extra == "múltiple":
+            mode = "add"
+        elif extra == "quitar":
+            mode = "remove"
+        return SelectTool.on_box_select(self, viewport, rect, crossing, additive, mode)
 
 
 class _ArcoCadena(_BaseCadena):
@@ -842,7 +1213,7 @@ class _ArcoCadena(_BaseCadena):
 
 
 class ArcoCadena(_ArcoCadena, ArcTool):
-    name = "Rosco LT · arco"
+    name = con_nombre("Rosco · arco")
     icon = "arc"
 
     def __init__(self, cadena) -> None:
@@ -851,7 +1222,7 @@ class ArcoCadena(_ArcoCadena, ArcTool):
 
 
 class Arco3Cadena(_ArcoCadena, ThreePointArcTool):
-    name = "Rosco LT · arco por 3 puntos"
+    name = con_nombre("Rosco · arco por 3 puntos")
     icon = "arc3"
 
     def __init__(self, cadena) -> None:
@@ -860,7 +1231,7 @@ class Arco3Cadena(_ArcoCadena, ThreePointArcTool):
 
 
 class ArcoCentroCadena(_ArcoCadena, CenterArcTool):
-    name = "Rosco LT · arco por centro"
+    name = con_nombre("Rosco · arco por centro")
     icon = "center_arc"
 
     def __init__(self, cadena) -> None:
@@ -869,7 +1240,7 @@ class ArcoCentroCadena(_ArcoCadena, CenterArcTool):
 
 
 class PorcionCadena(_ArcoCadena, PieTool):
-    name = "Rosco LT · porción"
+    name = con_nombre("Rosco · porción")
     icon = "pie"
     porcion = True
 
@@ -880,7 +1251,7 @@ class PorcionCadena(_ArcoCadena, PieTool):
 
 class CotaCadena(_BaseCadena, DimensionTool):
     clave = "medir"
-    name = "Rosco LT · cota"
+    name = con_nombre("Rosco · cota")
     icon = "dimension"
 
     def __init__(self, cadena) -> None:
@@ -890,7 +1261,7 @@ class CotaCadena(_BaseCadena, DimensionTool):
 
 class CintaCadena(_BaseCadena, TapeMeasureTool):
     clave = "medir"
-    name = "Rosco LT · medir"
+    name = con_nombre("Rosco · medir")
     icon = "tape"
 
     def __init__(self, cadena) -> None:
@@ -900,7 +1271,7 @@ class CintaCadena(_BaseCadena, TapeMeasureTool):
 
 class EquidistanciaCadena(_BaseCadena, OffsetTool):
     clave = "linea"
-    name = "Rosco LT · equidistancia"
+    name = con_nombre("Rosco · equidistancia")
     icon = "offset"
 
     def __init__(self, cadena) -> None:
@@ -910,7 +1281,7 @@ class EquidistanciaCadena(_BaseCadena, OffsetTool):
 
 class RedondeoCadena(_BaseCadena, FilletTool):
     clave = "linea"
-    name = "Rosco LT · redondear 3D"
+    name = con_nombre("Rosco · redondear 3D")
     icon = "fillet"
 
     def __init__(self, cadena) -> None:
@@ -954,7 +1325,7 @@ class ParalelaCadena(_BaseCadena, Tool):
     varias aristas usa el mismo cálculo de esquinas que la Equidistancia de
     IngeTrazo (``core.offset.offset_chain``)."""
     clave = "linea"
-    name = "Rosco LT · paralela"
+    name = con_nombre("Rosco · paralela")
     icon = "offset"
     vcb_label = "Distance"
     wireframe_color = (0.84, 0.13, 0.13, 1.0)
@@ -1132,12 +1503,325 @@ class ParalelaCadena(_BaseCadena, Tool):
         return (fmt_len(abs(self.distancia)), self.hover_point)
 
 
+def _centro_cara(f) -> QVector3D:
+    c = getattr(f, "centroid", None)
+    if callable(c):
+        c = c()
+    if c is not None:
+        return QVector3D(c)
+    vs = [QVector3D(v) for v in f.vertices]          # Face.vertices: posiciones
+    s = QVector3D()
+    for v in vs:
+        s += v
+    return s / max(1, len(vs))
+
+
+def _normal_cara(f) -> QVector3D:
+    n = f.normal() if callable(f.normal) else f.normal
+    n = QVector3D(n)
+    return n.normalized() if n.lengthSquared() > 1e-12 else n
+
+
+def _corte_recta_plano(p, d, q, n):
+    den = _dot(d, n)
+    if abs(den) < 1e-9:
+        return None
+    return p + d * (_dot(q - p, n) / den)
+
+
+def _corte_rectas(p1, d1, p2, d2):
+    c = QVector3D.crossProduct(d1, d2)
+    c2 = c.lengthSquared()
+    if c2 < 1e-12:
+        return None
+    t = _dot(QVector3D.crossProduct(p2 - p1, d2), c) / c2
+    return p1 + d1 * t
+
+
+class Contorno3DCadena(_BaseCadena, Tool):
+    """Línea ▸ contorno 3D: un perímetro paralelo a otro, por las caras del
+    elemento. Las aristas del perímetro son las seleccionadas al empezar
+    (o las que se van pinchando: clic en una que ya está la quita); con el
+    ratón sobre una cara del lado que quieras, clic o la distancia
+    tecleada. El perímetro nuevo va a esa distancia de cada arista, cada
+    tramo en su cara, y las parte."""
+    clave = "linea"
+    name = con_nombre("Rosco · contorno 3D")
+    icon = "offset"
+    vcb_label = "Distance"
+    uses_snap = False
+
+    def __init__(self, cadena) -> None:
+        self.cadena = cadena
+        self.aristas: list = []
+        self._reset()
+
+    def _reset(self) -> None:
+        self.start_point = None              # hay perímetro listo (para «ocupada»)
+        self.hover_point = None
+        self.distancia = 0.0
+        self._cara = None
+        self._previa: list = []
+
+    def on_activate(self, viewport) -> None:
+        mesh = viewport.scene.mesh
+        propias = set(mesh.edges)
+        self.aristas = [e for e in viewport.scene.selection if e in propias]
+        self._reset()
+        self._mirar_cadena(viewport)
+        viewport.flash_status(_tr("Contorno 3D: elige las aristas del perímetro (clic en ellas) y "
+                                  "luego, con el ratón sobre una cara del lado, clic o teclea la "
+                                  "distancia + Enter."), 9000)
+
+    def on_deactivate(self, viewport) -> None:
+        viewport.set_hover(None)
+        self.aristas = []
+        self._reset()
+
+    def on_cancel(self, viewport) -> None:
+        ocioso = not self.aristas
+        viewport.set_hover(None)
+        self.aristas = []
+        self._reset()
+        viewport.update()
+        if ocioso:
+            self.cadena.alternar_arco(viewport)
+
+    # -- el perímetro --
+    def _ordenar(self):
+        """[(arista, inicio, fin)] seguidas y si se cierra; None si no forman
+        una sola cadena."""
+        if not self.aristas:
+            return None
+        por_v: dict = {}
+        for e in self.aristas:
+            for v in (e.v0, e.v1):
+                por_v.setdefault(id(v), []).append(e)
+        if any(len(l) > 2 for l in por_v.values()):
+            return None
+        sueltos = [e for e in self.aristas
+                   if len(por_v[id(e.v0)]) == 1 or len(por_v[id(e.v1)]) == 1]
+        cerrada = not sueltos
+        primera = sueltos[0] if sueltos else self.aristas[0]
+        if sueltos:
+            v = primera.v0 if len(por_v[id(primera.v0)]) == 1 else primera.v1
+        else:
+            v = primera.v0
+        orden, usadas, e = [], set(), primera
+        while e is not None and id(e) not in usadas:
+            usadas.add(id(e))
+            otro = e.v1 if e.v0 is v else e.v0
+            orden.append((e, v, otro))
+            v = otro
+            e = next((x for x in por_v[id(v)] if id(x) not in usadas), None)
+        if len(orden) != len(self.aristas):
+            return None
+        return orden, cerrada
+
+    def _mirar_cadena(self, viewport) -> None:
+        listo = self._ordenar()
+        self.start_point = QVector3D(listo[0][0][1].position) if listo else None
+
+    def _caras(self, orden, cerrada, cara, punto):
+        """La cara de cada arista por el lado de ``cara``, de una en una por
+        las esquinas."""
+        n = len(orden)
+        caras = [None] * n
+        i0 = next((i for i, (e, _a, _b) in enumerate(orden) if cara in (e.faces or ())), None)
+        if i0 is None:
+            e0 = orden[0][0]
+            if not e0.faces:
+                return None
+            i0 = 0
+            caras[0] = min(e0.faces, key=lambda f: (_centro_cara(f) - punto).length())
+        else:
+            caras[i0] = cara
+
+        def siguiente(i, j, v):
+            """La cara de la arista j que sigue a la cara de la i por el vértice v."""
+            fi, ej = caras[i], orden[j][0]
+            opciones = list(ej.faces or ())
+            if not opciones:
+                return None
+            if fi in opciones:
+                return fi
+            for x in getattr(v, "edges", None) or ():
+                if x is orden[i][0] or x is ej or fi not in (x.faces or ()):
+                    continue
+                comun = [f for f in (x.faces or ()) if f is not fi and f in opciones]
+                if comun:
+                    return comun[0]
+            return opciones[0]
+        for j in range(i0 + 1, n):
+            caras[j] = siguiente(j - 1, j, orden[j][1])
+        for j in range(i0 - 1, -1, -1):
+            caras[j] = siguiente(j + 1, j, orden[j][2])
+        if any(c is None for c in caras):
+            return None
+        return caras
+
+    def _puntos(self, d):
+        """Los vértices del perímetro nuevo (y si se cierra)."""
+        listo = self._ordenar()
+        if not listo or self._cara is None:
+            return None
+        orden, cerrada = listo
+        caras = self._caras(orden, cerrada, self._cara[0], self._cara[1])
+        if caras is None:
+            return None
+        lineas = []
+        for (e, a, b), f in zip(orden, caras):
+            pa, pb = QVector3D(a.position), QVector3D(b.position)
+            dv = pb - pa
+            if dv.lengthSquared() < 1e-12:
+                return None
+            dv = dv.normalized()
+            nf = _normal_cara(f)
+            u = QVector3D.crossProduct(nf, dv)
+            if u.lengthSquared() < 1e-12:
+                return None
+            u = u.normalized()
+            if _dot(_centro_cara(f) - (pa + pb) * 0.5, u) < 0:
+                u = -u
+            lineas.append((pa + u * d, dv, pa, pb, u, f, nf))
+        pts = []
+        n = len(lineas)
+        juntas = range(n) if cerrada else range(n - 1)
+        esquinas = {}
+        for i in juntas:
+            j = (i + 1) % n
+            p1, d1, _a1, b1, u1, f1, n1 = lineas[i]
+            p2, d2, _a2, _b2, _u2, f2, n2 = lineas[j]
+            if f1 is f2 or QVector3D.crossProduct(n1, n2).lengthSquared() < 1e-10:
+                x = _corte_rectas(p1, d1, p2, d2)
+            else:
+                x1 = _corte_recta_plano(p1, d1, b1, n2)
+                x2 = _corte_recta_plano(p2, d2, b1, n1)
+                if x1 is not None and x2 is not None:
+                    x = (x1 + x2) * 0.5
+                else:
+                    x = x1 if x1 is not None else x2
+            esquinas[i] = x if x is not None else b1 + u1 * d
+        if cerrada:
+            pts = [esquinas[(i - 1) % n] for i in range(n)]
+            pts.append(QVector3D(pts[0]))
+        else:
+            pts = [lineas[0][2] + lineas[0][4] * d] + [esquinas[i] for i in range(n - 1)] \
+                + [lineas[-1][3] + lineas[-1][4] * d]
+        return pts
+
+    def _dist(self, w) -> float:
+        mejor = None
+        for e in self.aristas:
+            a, b = QVector3D(e.v0.position), QVector3D(e.v1.position)
+            ab = b - a
+            t = max(0.0, min(1.0, _dot(w - a, ab) / max(_dot(ab, ab), 1e-12)))
+            dist = (w - (a + ab * t)).length()
+            mejor = dist if mejor is None or dist < mejor else mejor
+        return mejor or 0.0
+
+    # -- ratón --
+    def on_hover(self, ctx: ToolContext) -> None:
+        vp = ctx.viewport
+        self.cadena.cursor_movido(ctx.screen, self)
+        x, y = ctx.screen.x(), ctx.screen.y()
+        arista = vp.pick_edge(x, y)
+        if arista is not None:
+            vp.set_hover(arista)
+            self._cara = None
+            self._previa = []
+        else:
+            try:
+                cara = vp.pick_face(x, y)
+            except Exception:  # noqa: BLE001
+                cara = None
+            vp.set_hover(None)
+            if cara is not None and self.start_point is not None:
+                w = QVector3D(ctx.world)
+                self._cara = (cara, w)
+                self.hover_point = w
+                self.distancia = self._dist(w)
+                self._previa = self._puntos(self.distancia) or []
+            else:
+                self._cara = None
+                self._previa = []
+        vp.update()
+
+    def on_click(self, ctx: ToolContext) -> None:
+        vp = ctx.viewport
+        if not self.aristas and self.cadena.clic_en_selector(vp, ctx.screen):
+            return
+        arista = vp.pick_edge(ctx.screen.x(), ctx.screen.y())
+        if arista is not None:
+            if arista in self.aristas:
+                self.aristas.remove(arista)
+            else:
+                self.aristas.append(arista)
+            self._mirar_cadena(vp)
+            if self.aristas and self.start_point is None:
+                vp.flash_status(_tr("Contorno 3D: esas aristas no forman un perímetro seguido."), 3000)
+            vp.update()
+            return
+        if self.start_point is None or self._cara is None:
+            vp.flash_status(_tr("Contorno 3D: primero elige las aristas del perímetro."), 3000)
+            return
+        if self.distancia > 1e-6:
+            self._poner(vp, self.distancia)
+
+    def on_value(self, viewport, value) -> bool:
+        if self.start_point is None or self._cara is None or isinstance(value, tuple) or value == 0.0:
+            return False
+        self._poner(viewport, abs(float(value)))
+        return True
+
+    def _poner(self, viewport, d) -> None:
+        pts = self._puntos(d)
+        if not pts or len(pts) < 2:
+            viewport.flash_status(_tr("Contorno 3D: no se pudo seguir el perímetro por las caras."), 4000)
+            return
+        from core.edits import build_add_edges
+        tramos = [(pts[i], pts[i + 1]) for i in range(len(pts) - 1)
+                  if (pts[i + 1] - pts[i]).length() > 1e-9]
+        viewport.history.execute(build_add_edges(viewport.scene, tramos, detect_faces=True))
+        error = viewport.history.last_error
+        viewport.set_hover(None)
+        self.aristas = []
+        self._reset()
+        viewport.notify_scene_changed()
+        viewport.flash_status(_tr("Contorno 3D: no se pudo crear: {0}", error) if error else
+                              _tr("Contorno 3D creado a {0}. Elige otro perímetro, o Esc.", fmt_len(d)), 5000)
+
+    def rubber_band_lines(self):
+        pts = self._previa
+        return [(pts[i], pts[i + 1]) for i in range(len(pts) - 1)] if pts else []
+
+    def value_label(self):
+        if self.hover_point is None or not self._previa:
+            return None
+        return (fmt_len(self.distancia), self.hover_point)
+
+    def dibujar(self, viewport, painter) -> None:
+        """Overlay: las aristas del perímetro elegido, en azul grueso."""
+        if viewport.active_tool is not self or not self.aristas:
+            return
+        from ._flotante import a_pantalla
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor(30, 110, 220), 3.0))
+        for e in self.aristas:
+            a = a_pantalla(viewport, QVector3D(e.v0.position))
+            b = a_pantalla(viewport, QVector3D(e.v1.position))
+            if a is not None and b is not None:
+                painter.drawLine(a, b)
+        painter.restore()
+
+
 class EsperaCadena(_BaseCadena, Tool):
-    """La barra de dibujo recién llamado, sin herramienta elegida: solo la barra. Un clic
-    fuera de ella (o Esc) cierra la barra de dibujo y deja Seleccionar de IngeTrazo."""
+    """El anillo recién llamado, sin herramienta elegida: solo la barra. Un clic
+    fuera de ella (o Esc) cierra el anillo y deja Seleccionar de IngeTrazo."""
     clave = "espera"
-    name = "Rosco LT"
-    description = "Choose a tool on the Rosco LT bar."
+    name = con_nombre("Rosco")
+    description = con_nombre("Choose a tool on the Rosco bar.")
     uses_snap = False
     start_point = None
 
@@ -1157,16 +1841,18 @@ class EsperaCadena(_BaseCadena, Tool):
         if self.cadena.clic_en_selector(ctx.viewport, ctx.screen):
             return
         cadena = self.cadena
-        QTimer.singleShot(0, lambda: cadena.cerrar_barra_dibujo(ctx))
+        if cadena._en_centro(QPointF(ctx.screen)):
+            return                           # el centro del rosco: el clic no lo cierra
+        QTimer.singleShot(0, lambda: cadena.cerrar_anillo(ctx))
 
     def on_cancel(self, viewport) -> None:
-        QTimer.singleShot(0, self.cadena.cerrar_barra_dibujo)
+        QTimer.singleShot(0, self.cadena.cerrar_anillo)
 
 
 # ---- Fase 2: empujar / tirar ----------------------------------------------------
 
 class EmpujarCadena(PushPullTool):
-    name = "Rosco LT · altura"
+    name = con_nombre("Rosco · altura")
     shortcut = None
     shortcut_alt = None
     icon = "pushpull"                    # el cursor de Empujar/Tirar
@@ -1234,7 +1920,7 @@ class Cadena:
 
     @tema.setter
     def tema(self, t: _temas.Tema) -> None:
-        # Con el tema B todos los iconos de Rosco LT van en silueta negra
+        # Con el tema B todos los iconos de Rosco van en silueta negra
         # (también en la vista previa del menú de temas); con C a N, en
         # líneas y sombreado, y el rojo de la barra pasa al color del tema.
         self._tema = t
@@ -1283,10 +1969,15 @@ class Cadena:
             ("linea", "guía"): self.guia,
             ("linea", "equidist."): EquidistanciaCadena(self),
             ("linea", "paralela"): ParalelaCadena(self),
-            ("linea", "redondear"): RedondeoCadena(self),
+            ("empujar", "redondear 3D"): RedondeoCadena(self),
             ("rect", "lado"): self.girado,
             ("rect", "girado"): self.girado,
         }
+        if _edicion.con("contorno_3d"):
+            self.por_modo[("linea", "contorno 3D")] = Contorno3DCadena(self)
+        if _edicion.con("anotar"):
+            self.por_modo[("linea", "anotar")] = AnotarCadena(self)
+            self.por_modo[("linea", "borrar anotaciones")] = self.por_modo[("linea", "anotar")]
         self._todas = list(self.bases.values()) + [
             t for t in self.por_modo.values()
             if not any(t is o for o in self.bases.values())]
@@ -1294,7 +1985,11 @@ class Cadena:
                        if not any(t is o for o in self._todas[:i])]
         self.base = None                      # la herramienta elegida (ninguna al llamar)
         self.modo = {clave: modos[0] for clave, modos in MODOS.items()}
+        self.modo["seleccionar"] = "ventana"  # empieza en la selección normal (lazo apagado)
         self.modo["grupo"] = "nada"           # al terminar: nada, grupo o componente
+        self.modo["agrupar"] = _seleccion.AGRUPAR[0]   # Crear: la última acción
+        self._cargar_ultimas()                # la última orden de cada botón se recuerda
+        _flotante.ICONO_VIVO = None           # el botón conserva su icono (2.49.2)
         self.pedir_nombre = False             # grupo: pedir el nombre al crearlo
         self._antes_clic = (False, False)     # (barra a la vista, orden a medias) al pulsar
         self._pila_al_pulsar = None           # el historial al pulsar el izquierdo
@@ -1302,7 +1997,7 @@ class Cadena:
         self._pila_orden0 = None              # orden que sigue: el historial al empezarla
         self._tool_orden0 = None              # … y de qué herramienta
         self._cargar_grupo()                  # la opción de Grupo se recuerda
-        self.espera = EsperaCadena(self)      # La barra de dibujo sin herramienta elegida
+        self.espera = EsperaCadena(self)      # el anillo sin herramienta elegida
         self._todas.append(self.espera)
         self.push = EmpujarCadena(self)
         self.cursor_px: QPointF | None = None
@@ -1311,6 +2006,16 @@ class Cadena:
         self.arco_visible = True
         self.ancla: QPointF | None = None     # centro de los arcos (px del visor)
         self.panel: str | None = None         # botón cuyo submenú está abierto
+        self.sel_extra = None                 # Seleccionar: «múltiple» o «quitar» encendido
+        self._previa = None                   # el botón cuya vista previa se ve (o va a salir)
+        self._reloj_previa = None
+        self._ventana_previa = None
+        self._pegado = None                   # el botón con su subrosco pegado a él (2.50.0)
+        self._despliegue = None               # el botón con sus opciones en el anillo
+        self._reloj_cierre = None
+        self._sel_vista = frozenset()         # la selección vista (no saca el rosco)
+        self._fly = None                      # el hueco con su sub-submenú abierto
+        self._fly_bajo = None                 # la orden del sub-submenú bajo el ratón
         self._bajo: str | None = None         # botón bajo el cursor
         self.fijo = False                     # barra fija (ventanita) o cursor
         # El rosco en espera, pulsando en vacío (ver ``_evento_espera``).
@@ -1323,15 +2028,24 @@ class Cadena:
         self._clics_orden = 0
         self._linea_tool = None
         self._cursor_barra = None             # el cursor puesto sobre los botones
-        self._ayuda_pagina = 0                # la pestaña abierta de la ayuda
-        self._reloj_anima = None
-        self._anima_esc = AYUDA_ESCENAS[0]    # el gesto que enseña la pantallita
-        self._anima_t = time.monotonic()
-        self._anima_fila = None               # los gestos de la fila bajo el ratón
-        self._ayuda_cache = None
+        self._reloj_apagar = None             # el botón Apagar: espera por si hay doble clic
         # El botón derecho: qué espera el clic retenido («orden» o «rosco») y su reloj.
         self._derecho = None
         self._reloj_derecho = None
+        # El derecho sostenido (el aro y el menú de IngeTrazo) y, con Rosco
+        # apagado, el triple derecho que lo enciende.
+        self._reloj_sostener = None
+        self._aro = None
+        self._reloj_apagado = None
+        self._derecho_pulsado = False
+        self._sostenido = False
+        self._derecho_con_orden = False
+        self._n_derecho = 0
+        self._derecho_ya = None               # 1.8.0: lo ya hecho al soltar el derecho
+        try:
+            _seleccion.migrar_derecho_248()
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo pasar al reparto de clics de la 2.48.0")
         self._tragar_menu = False             # el menú contextual de este clic no sale
         # El dictado de medidas tras cada punto (Opciones).
         self._dictado_llave = None            # (orden, clics, medidas aplicadas) ya atendidos
@@ -1339,9 +2053,17 @@ class Cadena:
         self.escala = _temas.escala_guardada()
         self.tema = _temas.escalar(_temas.guardado(), self.escala)   # la maquetación del anillo
         # Qué va en cada hueco (temas con rueda): se configura desde
-        # el gestor de barras, apartado «Barra Rosco LT».
+        # el gestor de barras, apartado «Barra Rosco».
         self.huecos = _huecos.Huecos(self._huecos_defecto(), tuple(CHICOS_F.values()),
-                                     al_cambiar=self._huecos_cambiados)
+                                     al_cambiar=self._huecos_cambiados,
+                                     al_activar=self._juego_cambiado)
+        QTimer.singleShot(0, self._ojos_cambiados_190)   # ya montado todo
+        _ULTIMA[:] = [self]
+        if _edicion.con("anillos2"):
+            from . import _anillos2
+            _anillos2.preparar(self.huecos)
+        self._aplicar_anillos()
+        self._previsualizando = False         # en las miniaturas de temas no hay puntos
         self._poner_rueda()
         _diana.NOMBRE_CORTO = self._texto_icono       # etiquetas de gajos y disco
         self.escondida = False                # Simetría: todo oculto hasta que termine
@@ -1351,6 +2073,7 @@ class Cadena:
         # Tras cada orden (opción «esconder_tras») la barra se duerme: queda
         # Seleccionar y no vuelve hasta un clic en el vacío o una selección.
         self.dormida = False
+        self._submenu_fuera = None            # (submenú, orden) al salir a los paneles
         self._sel_dormida = frozenset()       # la selección al dormirse
         self._pila_vista = None               # el historial en el último repaso
         self._obra = False                    # la orden en curso ya hizo algo
@@ -1392,6 +2115,11 @@ class Cadena:
         # La capa de dibujo y dónde va su pastilla en la barra.
         self.capas = Capas(self)
         self.pos_capa = "abajo"
+        # Los nombres de los pasos de deshacer y rehacer (su lista larga).
+        self.pasos = None
+        if _edicion.con("pasos"):
+            from ._pasos import Pasos
+            self.pasos = Pasos()
         # El desplegable Navegador (espejo del panel), al lado de la capa.
         self.navegador = Navegador(self)
         # Los menús de IngeTrazo en árbol (botón junto a la lupa / la chincheta).
@@ -1411,6 +2139,44 @@ class Cadena:
         self.escala_rosco = _seleccion.escala_rosco()               # Opciones, en %
         # La ventanita de medidas (renglones y calculadora).
         self.medidas = None
+        self.solo_2d = self._leer_solo_2d()   # 1.6.0: las bases no pasan a Empujar
+
+    def _ojos_cambiados_190(self) -> None:
+        """1.9.0, una sola vez: el ojo amarillo pasa a las texturas y el verde a
+        los últimos comandos (si estaban como venían de serie)."""
+        try:
+            from ._ajustes import ajustes
+            s = ajustes("migraciones")
+            if str(s.value("ojos_190", False)).lower() in ("true", "1"):
+                return
+            ojos = self.huecos.ojos()
+            if ojos.get("izquierda") == "historial" and ojos.get("derecha") == "texturas":
+                self.huecos.intercambiar("ojos", "izquierda", "ojos", "derecha")
+            s.setValue("ojos_190", True)
+            s.sync()
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudieron intercambiar los ojos")
+
+    @staticmethod
+    def _leer_solo_2d() -> bool:
+        try:
+            from ._ajustes import ajustes
+            return str(ajustes("medidas").value("solo_2d", False)).lower() in ("true", "1")
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _poner_solo_2d(self, valor) -> None:
+        self.solo_2d = bool(valor)
+        try:
+            from ._ajustes import ajustes
+            s = ajustes("medidas")
+            s.setValue("solo_2d", self.solo_2d)
+            s.sync()
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo guardar Solo 2D")
+        vp = self.app.viewport
+        vp.flash_status(_tr("Solo 2D: las figuras se quedan planas." if self.solo_2d
+                            else "Solo 2D apagado: las figuras pasan a Empujar."), 3000)
 
     # -- la opción de Grupo, recordada entre sesiones --
     @staticmethod
@@ -1438,21 +2204,32 @@ class Cadena:
         except Exception:  # noqa: BLE001
             log.exception("no se pudo guardar la opción de Grupo")
 
-    def cerrar_barra_dibujo(self, ctx=None) -> None:
+    def cerrar_anillo(self, ctx=None) -> None:
         """Clic fuera de la barra sin herramienta elegida (o Esc): se cierra
-        la barra de dibujo y queda Seleccionar de IngeTrazo; el clic, si lo hubo, le llega
+        el anillo y queda Seleccionar de IngeTrazo; el clic, si lo hubo, le llega
         a Seleccionar (selecciona lo que haya debajo, o nada)."""
         vp = self.app.viewport
         self._soltar()
-        self.aplicar_capa = False            # se apaga al cerrar la barra
+        self._despliegue = None
+        if self._ids_sel(vp):
+            # 1.3.0: con algo seleccionado, no vuelve pegado al cursor: se
+            # duerme hasta que se le llame (o cambie la selección).
+            self.dormida = True
+            self.panel = None
+            self._sel_dormida = self._ids_sel(vp)
+        # Aplicar capa sigue encendido hasta que se toque otra vez su icono:
+        # se trata de ir seleccionando cosas con la barra cerrada.
         sel = self._a_seleccionar(vp)
         if ctx is not None and sel is not None and vp.active_tool is sel:
             try:
-                # El clic que cierra la barra de dibujo no cuenta como «clic en el vacío»
-                # (volvería a abrir la barra de dibujo): va al Seleccionar sin ese añadido.
+                # El clic que cierra el anillo no cuenta como «clic en el vacío»
+                # (volvería a abrir el anillo): va al Seleccionar sin ese añadido.
+                self._pasar_clic = True
                 getattr(sel, "_clic_original", sel.on_click)(ctx)
             except Exception:  # noqa: BLE001
                 log.exception("Seleccionar no aceptó el clic")
+            finally:
+                self._pasar_clic = False
         self._sincronizar()
         vp.update()
 
@@ -1482,7 +2259,7 @@ class Cadena:
 
     def _de_la_barra(self, viewport) -> bool:
         """La herramienta activa es de las que da la barra (y no Seleccionar):
-        las de la barra de dibujo y su altura, Pintar y las de la barra de modificar."""
+        las del anillo y su altura, Pintar y las del arco de modificar."""
         tool = viewport.active_tool
         if tool is None or tool is self._select_nativo() or tool is self.bases["seleccionar"]:
             return False
@@ -1493,15 +2270,15 @@ class Cadena:
     def _seguir_orden(self, viewport) -> bool:
         """Las órdenes de dibujar y de modificar del rosco siguen activas tras
         cada uso (sin la barra) hasta el clic derecho (terminar) o el doble
-        clic izquierdo (cancelar). Texto no: se queda sola y su doble clic
-        edita un texto; Alinear tampoco: necesita una selección nueva."""
+        clic izquierdo (cancelar). Texto sigue sola (su doble clic lo trata
+        ``_doble_texto``); Alinear no: necesita una selección nueva."""
         return self._de_la_barra(viewport)
 
     def _editando(self, viewport) -> bool:
         """Una orden de editar (las de modificar y Alinear)."""
         if self._modificando(viewport):
             return True
-        barra = self._barra_modificar()
+        barra = self._arco_modificar()
         try:
             return barra is not None and barra._clave_activa(viewport) == "align"
         except Exception:  # noqa: BLE001
@@ -1523,7 +2300,7 @@ class Cadena:
         self.escondida = False
         simetria = getattr(self, "simetria", None)
         copiando = viewport.active_tool is simetria and getattr(simetria, "copiando", False)
-        barra = self._barra_modificar()
+        barra = self._arco_modificar()
         if barra is not None and not copiando:
             # Desplazar o Rotar con copia vuelven a coger lo mismo para otra copia.
             from ._arco import COPIA
@@ -1543,7 +2320,7 @@ class Cadena:
 
     def _orden_hecha(self, viewport) -> None:
         """Algo terminó de hacerse (un dibujo, un movimiento, borrar…): se
-        mira en cuanto la herramienta ha dicho si sigue (la barra de dibujo pasa de la
+        mira en cuanto la herramienta ha dicho si sigue (el anillo pasa de la
         base a la altura; la línea encadena tramos). También dormida: lo
         repetido con doble clic acaba igual, en Seleccionar."""
         if not _seleccion.opcion("esconder_tras"):
@@ -1581,6 +2358,29 @@ class Cadena:
                 ahora = None
             if antes is not None and ahora is not None and ahora > antes:
                 self.diana.usar(viewport, "deshacer")
+            if self._cancelable(viewport):
+                self._terminar_orden(viewport)
+                viewport.flash_status(_tr("Orden cancelada: vuelve Seleccionar."), 2500)
+        QTimer.singleShot(0, luego)
+
+    def _doble_texto(self, viewport, antes, x, y) -> None:
+        """Doble clic con Texto: deshace el texto que dejó el primer clic; si
+        debajo hay un texto ya puesto, lo edita; si no, termina la orden y
+        vuelve Seleccionar."""
+        try:
+            ahora = len(viewport.history.undo_stack)
+        except Exception:  # noqa: BLE001
+            ahora = None
+        if antes is not None and ahora is not None and ahora > antes:
+            self.diana.usar(viewport, "deshacer")
+
+        def luego():
+            texto = getattr(self, "texto", None)
+            try:
+                if texto is not None and texto.editar_en(viewport, x, y):
+                    return
+            except Exception:  # noqa: BLE001
+                log.exception("no se pudo editar el texto bajo el ratón")
             if self._cancelable(viewport):
                 self._terminar_orden(viewport)
                 viewport.flash_status(_tr("Orden cancelada: vuelve Seleccionar."), 2500)
@@ -1656,6 +2456,12 @@ class Cadena:
         viewport.setFocus()
         viewport.flash_status(_tr("Muestrear: clic en una cara para tomar su material." if muestrear
                               else "Pintar: clic en las caras con el material activo."), 5000)
+        if muestrear:
+            # El cuentagotas: se quita todo para pinchar en el dibujo.
+            self._despliegue = None
+            self.panel = None
+            self._esconder_para_orden(viewport)
+            return
         self._sincronizar()
 
     def _final_actual(self) -> str:
@@ -1669,10 +2475,10 @@ class Cadena:
         self.pedir_nombre = fin == "con nombre"
         self._guardar_grupo()
         viewport.flash_status(
-            _tr({"nada": "Rosco LT: al terminar, las piezas quedan sueltas.",
-             "grupo": "Rosco LT: al terminar, cada pieza será un grupo.",
-             "con nombre": "Rosco LT: al terminar, cada pieza será un grupo con nombre.",
-             "componente": "Rosco LT: al terminar, cada pieza será un componente."}[fin]), 4000)
+            _tr({"nada": "Rosco: al terminar, las piezas quedan sueltas.",
+             "grupo": "Rosco: al terminar, cada pieza será un grupo.",
+             "con nombre": "Rosco: al terminar, cada pieza será un grupo con nombre.",
+             "componente": "Rosco: al terminar, cada pieza será un componente."}[fin]), 4000)
 
     def ocupada(self, tool) -> bool:
         """La herramienta tiene una operación en curso."""
@@ -1684,7 +2490,7 @@ class Cadena:
         for nombre in ("base_face", "dragging", "sizing"):
             if getattr(tool, nombre, None):
                 return True
-        if tool is self.por_modo.get(("linea", "redondear")) and getattr(tool, "edges", None):
+        if tool is self.por_modo.get(("empujar", "redondear 3D")) and getattr(tool, "edges", None):
             return True
         if tool is self.bases["seleccionar"]:
             return self._lazo is not None
@@ -1700,8 +2506,10 @@ class Cadena:
         app.add_overlay(self.dibujar)
         # Las piezas propias (Simetría, Texto) dibujan su ayuda encima del visor.
         app.add_overlay(self._dibujar_piezas)
+        app.add_overlay(self._dibujar_anotaciones)   # las de la escena, siempre encima
         self._filtro = _Filtro(self, app.viewport)
         app.viewport.installEventFilter(self._filtro)
+        self._vp_enganchado = app.viewport
         self.medidas = Medidas(app.window, app.viewport, self._parsear)
         self._reloj = QTimer(app.window)
         self._reloj.setInterval(SINCRONIA_MS)
@@ -1709,6 +2517,9 @@ class Cadena:
         self._reloj.timeout.connect(self.diana.vigilar)
         self._reloj.timeout.connect(self._vigilar_capa)
         self._reloj.timeout.connect(self._vigilar_seccion)
+        self._reloj.timeout.connect(self._vigilar_ajenas)
+        self._reloj.timeout.connect(self._vigilar_visor)
+
         # Selección múltiple (clic = añade o quita) en los dos Seleccionar.
         _seleccion.hacer_multiple(self.bases["seleccionar"])
         QTimer.singleShot(0, self._preparar_seleccionar)
@@ -1737,7 +2548,7 @@ class Cadena:
                 senal.connect(self._buffer_cambiado)
             except Exception:  # noqa: BLE001 — queda el respaldo de _buffer()
                 log.exception("no se pudo escuchar el búfer de medidas")
-        _interruptor.apuntar(app, _interruptor.entrada(app, "barra_dibujo", TITULO, self.activar, TIP),
+        _interruptor.apuntar(app, _interruptor.entrada(app, "anillo", TITULO, self.activar, TIP),
                              TITULO)
         try:
             self._instalar_barra()
@@ -1763,7 +2574,7 @@ class Cadena:
         except Exception:  # noqa: BLE001
             return
         for a in acciones:
-            if id(a) in de_herramienta or getattr(a, "_rosco_lt_hist", False):
+            if id(a) in de_herramienta or getattr(a, atributo("hist"), False):
                 continue
             texto = a.text().split("\t")[0].replace("&", "").strip().rstrip("…").rstrip(".")
             if not texto:
@@ -1780,7 +2591,7 @@ class Cadena:
                     break
             if any(palabra in titulo.lower() for palabra in HIST_SIN):
                 continue
-            a._rosco_lt_hist = True
+            setattr(a, atributo("hist"), True)
             a.triggered.connect(lambda _c=False, a=a, t=texto: self._apuntar(t, a.trigger))
 
     def _apuntar(self, nombre: str, repetir) -> None:
@@ -1795,13 +2606,13 @@ class Cadena:
 
     def _apuntar_herramienta(self, viewport, tool) -> None:
         """La herramienta recién activada (no la de espera, ni la altura de
-        la barra de dibujo, ni el Seleccionar de IngeTrazo)."""
+        el anillo, ni el Seleccionar de IngeTrazo)."""
         if tool is None or tool is self.espera or tool is self.push or tool is self._select_nativo():
             return
         win = self.app.window
         if self._es_base(tool):
             clave = getattr(tool, "clave", None)
-            nombre = NOMBRES.get(clave, getattr(tool, "name", "Rosco LT")).split(":")[0]
+            nombre = NOMBRES.get(clave, getattr(tool, "name", con_nombre("Rosco"))).split(":")[0]
 
             def repetir(c=clave, m=self.modo.get(clave)):
                 # La misma herramienta con el mismo modo (rectángulo por
@@ -1882,7 +2693,7 @@ class Cadena:
 
     def _gesto_historial(self, p) -> None:
         """Temas A y B: pasar por el ojo del historial (de serie, el
-        amarillo) o por el de la ayuda (el verde) abre su panel al lado;
+        amarillo) abre su panel al lado;
         salir de él (y del ojo) lo cierra."""
         if not self.tema.rueda or self.ancla is None or p is None:
             return
@@ -1899,7 +2710,7 @@ class Cadena:
                     return
 
     def _en_historial(self, p) -> bool:
-        """El panel abierto por un ojo (historial o ayuda, con margen) y el
+        """El panel abierto por un ojo (historial, con margen) y el
         pasillo que va del ojo hasta él: cruzarlo no lo cierra ni suelta la
         barra."""
         g = self._panel() if self.panel in PANELES_OJO else None
@@ -1917,265 +2728,9 @@ class Cadena:
         y0, y1 = sorted((q.y(), m.bottom() if cual == "arriba" else m.top()))
         return QRectF(q.x() - a, y0, 2.0 * a, y1 - y0).contains(p)
 
-    def _ayuda_maqueta(self):
-        """Cómo se reparte la pestaña abierta de la ayuda: ``(alto, piezas,
-        fuente)``, con cada pieza ``(tipo, rectángulo desde la esquina del
-        panel, texto o documento, extra)``: «titulo», «texto» (extra: el ojo
-        de color) o «clic» (extra: botón y veces)."""
-        f = QFont(self.win.font() if self.win is not None else QFont())
-        f.setPointSizeF(8.5)
-        f.setBold(False)
-        clave = (f.toString(), _idioma.actual(), self._ayuda_pagina)
-        guardada = getattr(self, "_ayuda_cache", None)
-        if guardada is not None and guardada[0] == clave:
-            return guardada[1]
-        negrita = QFont(f)
-        negrita.setBold(True)
-        fm, alto_titulo = QFontMetricsF(f), QFontMetricsF(negrita).height()
-        ancho = AYUDA_W - 20.0
-        y = AYUDA_ARRIBA
-        piezas = []
-        if self._ayuda_pagina == 0:
-            y += ANIMA_ALTO + 4.0
-            for titulo, filas in AYUDA_CLICS:
-                piezas.append(("titulo", QRectF(10.0, y, ancho, alto_titulo), _tr(titulo), None))
-                y += alto_titulo + 3.0
-                for boton, veces, html, escenas in filas:
-                    doc = QTextDocument()
-                    doc.setDefaultFont(f)
-                    doc.setDocumentMargin(0.0)
-                    doc.setTextWidth(ancho - AYUDA_RATON)
-                    doc.setHtml("<div style='color:#30302e'>" + _tr(html) + "</div>")
-                    alto = max(doc.size().height(), 22.0)
-                    piezas.append(("clic", QRectF(10.0, y, ancho, alto), doc, (boton, veces, escenas)))
-                    y += alto + 4.0
-                y += 3.0
-        else:
-            for titulo, cuerpo in AYUDA:
-                piezas.append(("titulo", QRectF(10.0, y, ancho, alto_titulo), _tr(titulo), None))
-                y += alto_titulo + 1.0
-                for ojo, texto in (cuerpo if isinstance(cuerpo, list) else [(None, cuerpo)]):
-                    x = 10.0 + (14.0 if ojo else 0.0)
-                    texto = _tr(texto)
-                    r = fm.boundingRect(QRectF(x, y, 10.0 + ancho - x, 2000.0),
-                                        Qt.AlignLeft | Qt.TextWordWrap, texto)
-                    piezas.append(("texto", QRectF(x, y, 10.0 + ancho - x, r.height()), texto, ojo))
-                    y += r.height()
-                y += 5.0
-        resultado = (y + 4.0, piezas, f)
-        self._ayuda_cache = (clave, resultado)
-        return resultado
-
-    @staticmethod
-    def _ratoncito(painter, x, y, boton, veces) -> None:
-        """El ratón pequeño de la ayuda, con el botón que toca en rojo."""
-        painter.save()
-        cuerpo = QRectF(x, y + 1.0, 13.0, 19.0)
-        painter.setPen(QPen(QColor(40, 40, 38), 1.1))
-        painter.setBrush(QBrush(QColor(255, 255, 255)))
-        painter.drawRoundedRect(cuerpo, 5.0, 5.0)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(ROJO))
-        painter.drawRoundedRect(QRectF(x + (1.5 if boton == "i" else 7.0), y + 2.5, 4.5, 7.5), 2.0, 2.0)
-        painter.setPen(QColor(40, 40, 38))
-        marca = {2: "×2", 0: "…"}.get(veces)
-        if marca:
-            f = QFont(painter.font())
-            f.setPointSizeF(7.0)
-            f.setBold(True)
-            painter.setFont(f)
-            painter.drawText(QRectF(x + 12.0, y + 9.0, 16.0, 12.0), Qt.AlignLeft | Qt.AlignVCenter, marca)
-        painter.restore()
-
-    def _pintar_ayuda(self, painter, g) -> None:
-        """El panel de la ayuda (el marco y «volver» ya están)."""
-        _alto, piezas, f = self._ayuda_maqueta()
-        caja = g["marco"]
-        negrita = QFont(f)
-        negrita.setBold(True)
-        painter.save()
-        painter.setFont(negrita)
-        painter.setPen(TINTA)
-        painter.drawText(g["titulo"], Qt.AlignLeft | Qt.AlignVCenter, _tr("Ayuda de Rosco LT"))
-        # Las pestañas.
-        for i, r in g["pestanas"]:
-            activa = i == self._ayuda_pagina
-            painter.setPen(QPen(QColor(91, 91, 214) if activa else QColor(190, 188, 180), 1.0))
-            painter.setBrush(QBrush(QColor(236, 234, 249) if activa else QColor(255, 255, 255)))
-            painter.drawRoundedRect(r, 4.0, 4.0)
-            painter.setFont(negrita if activa else f)
-            painter.setPen(QColor(45, 36, 112) if activa else QColor(90, 90, 86))
-            painter.drawText(r, Qt.AlignCenter, _tr(AYUDA_PESTANAS[i]))
-        painter.setClipRect(self._ayuda_recorte(g))
-        alto_linea = QFontMetricsF(f).height()
-        dy = self._ayuda_dy()
-        if getattr(self, "_ayuda_sobra", 0.0):
-            # La barrita de la derecha: dice que hay más y por dónde vas.
-            vista = self._ayuda_recorte(g)
-            total = vista.height() + self._ayuda_sobra
-            h = max(24.0, vista.height() * vista.height() / total)
-            y = vista.top() + (vista.height() - h) * (dy / self._ayuda_sobra)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(QColor(91, 91, 214, 110)))
-            painter.drawRoundedRect(QRectF(caja.right() - 6.0, y, 3.5, h), 1.75, 1.75)
-        for tipo, r, texto, extra in piezas:
-            r = r.translated(caja.left(), caja.top() - dy)
-            if tipo == "titulo":
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(QBrush(ROJO))
-                painter.drawEllipse(QPointF(r.left() + 4.0, r.center().y()), 3.5, 3.5)
-                painter.setFont(negrita)
-                painter.setPen(ROJO_OSCURO)
-                painter.drawText(r.adjusted(12.0, 0.0, 0.0, 0.0), Qt.AlignLeft | Qt.AlignVCenter, texto)
-                continue
-            if tipo == "clic":
-                self._ratoncito(painter, r.left(), r.top(), extra[0], extra[1])
-                painter.save()
-                painter.translate(r.left() + AYUDA_RATON, r.top())
-                texto.drawContents(painter)
-                painter.restore()
-                continue
-            if extra is not None:
-                painter.setPen(QPen(QColor(60, 60, 58), 0.8))
-                painter.setBrush(QBrush(OJOS[extra][2]))
-                painter.drawEllipse(QPointF(r.left() - 7.0, r.top() + alto_linea / 2.0), 4.0, 4.0)
-            painter.setFont(f)
-            painter.setPen(QColor(48, 48, 46))
-            painter.drawText(r, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, texto)
-        painter.restore()
-
-    # -- la pantallita animada de la ayuda --
-    def _anima_activa(self) -> bool:
-        return (self.panel == "ayuda" and self._ayuda_pagina == 0 and self.win is not None
-                and self.win.isVisible() and not self.win._transparente)
-
-    def _anima_caja(self, g) -> QRectF:
-        m = g["marco"]
-        return QRectF(m.left() + 10.0, m.top() + AYUDA_ARRIBA - self._ayuda_dy(),
-                      AYUDA_W - 20.0, ANIMA_ALTO)
-
-    def _anima_vigilar(self) -> None:
-        """El reloj de la animación solo anda con la pestaña de clics a la vista."""
-        if not self._anima_activa():
-            if self._reloj_anima is not None and self._reloj_anima.isActive():
-                self._reloj_anima.stop()
-            return
-        if self._reloj_anima is None:
-            self._reloj_anima = QTimer(self.app.window)
-            self._reloj_anima.setInterval(40)
-            self._reloj_anima.timeout.connect(self._anima_paso)
-        if not self._reloj_anima.isActive():
-            self._anima_t = time.monotonic()
-            self._reloj_anima.start()
-
-    def _anima_paso(self) -> None:
-        if not self._anima_activa():
-            self._reloj_anima.stop()
-            return
-        g = self._panel()
-        if g is None or self.ancla is None:
-            return
-        if time.monotonic() - self._anima_t >= _anima.DURACION_S:
-            lista = self._anima_fila or AYUDA_ESCENAS
-            i = lista.index(self._anima_esc) if self._anima_esc in lista else -1
-            self._anima_esc = lista[(i + 1) % len(lista)]
-            self._anima_t = time.monotonic()
-            self.win.update()                # cambia también la fila resaltada
-            return
-        caja = self._anima_caja(g).translated(-self.win.origen.x(), -self.win.origen.y())
-        self.win.update(caja.adjusted(-1.0, -1.0, 1.0, 1.0).toAlignedRect())
-
-    def _anima_raton(self, p) -> None:
-        """Al pasar por una fila, se queda en sus gestos."""
-        fila = None
-        if p is not None and self._anima_activa():
-            g = self._panel()
-            if g is not None:
-                m = g["marco"].topLeft()
-                for tipo, r, _d, extra in self._ayuda_maqueta()[1]:
-                    if tipo == "clic" and r.translated(m.x(), m.y() - self._ayuda_dy()).contains(p):
-                        fila = extra[2]
-                        break
-        if fila != self._anima_fila:
-            self._anima_fila = fila
-            if fila and self._anima_esc not in fila:
-                self._anima_esc = fila[0]
-                self._anima_t = time.monotonic()
-                self.win.update()
-
-    def _pintar_anima(self, painter, c) -> None:
-        """Encima del fondo guardado: la pantallita y la fila que le toca."""
-        g = self._panel(c)
-        if g is None or "pestanas" not in g:
-            return
-        k = min(1.0, max(0.0, (time.monotonic() - self._anima_t) / _anima.DURACION_S))
-        painter.save()
-        painter.setClipRect(self._ayuda_recorte(g))
-        _anima.pintar(painter, self._anima_caja(g), self._anima_esc, k)
-        m = g["marco"].topLeft()
-        dy = self._ayuda_dy()
-        for tipo, r, _d, extra in self._ayuda_maqueta()[1]:
-            if tipo == "clic" and self._anima_esc in extra[2]:
-                painter.save()
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(QBrush(QColor(91, 91, 214, 38)))
-                painter.drawRoundedRect(r.translated(m.x(), m.y() - dy).adjusted(-4.0, -1.0, 4.0, 1.0), 4.0, 4.0)
-                painter.restore()
-                break
-        painter.restore()
-
-    # -- la ayuda que no cabe entera: se desplaza con la rueda --
-    def _ayuda_dy(self) -> float:
-        return float(getattr(self, "_ayuda_scroll", 0.0) or 0.0)
-
-    def _ayuda_recorte(self, g) -> QRectF:
-        """Por dónde se ve el contenido de la ayuda (bajo las pestañas)."""
-        m = g["marco"]
-        return QRectF(m.left() + 1.0, m.top() + AYUDA_ARRIBA - 4.0, m.width() - 2.0,
-                      m.height() - AYUDA_ARRIBA + 3.0)
-
-    def _zona_visible(self, c) -> QRectF:
-        """Lo que se ve de la ventanita del rosco centrada en ``c`` (px del
-        visor): su rectángulo recortado al monitor y a la pantalla gráfica."""
-        zona = QRectF(c.x() - ANCLA_LOCAL.x() + 4.0, c.y() - ANCLA_LOCAL.y() + 4.0,
-                      VENTANA_W - 8.0, VENTANA_H - 8.0)
-        try:
-            from PySide6.QtGui import QGuiApplication
-            vp = self.app.viewport
-            origen = vp.mapToGlobal(QPoint(0, 0))
-            pantalla = (QGuiApplication.screenAt(vp.mapToGlobal(QPoint(round(c.x()), round(c.y()))))
-                        or vp.screen())
-            g = pantalla.availableGeometry()
-            monitor = QRectF(g.x() - origen.x() + 4.0, g.y() - origen.y() + 4.0,
-                             g.width() - 8.0, g.height() - 8.0)
-            # Y dentro de la pantalla gráfica: lo de fuera del visor no se ve.
-            visor = QRectF(vp.rect()).adjusted(4.0, 4.0, -4.0, -4.0)
-            visible = zona.intersected(monitor).intersected(visor)
-            if visible.width() > 0 and visible.height() > 0:
-                return visible
-        except Exception:  # noqa: BLE001 — sin monitor, la ventanita
-            log.exception("no se pudo medir el monitor")
-        return zona
-
-    def raton_rueda(self, p, delta) -> bool:
-        """La rueda sobre la ayuda que no cabe entera la desplaza (True)."""
-        if self.panel != "ayuda" or not getattr(self, "_ayuda_sobra", 0.0):
-            return False
-        g = self._panel()
-        if g is None or not g["marco"].contains(p):
-            return False
-        nuevo = min(self._ayuda_sobra, max(0.0, self._ayuda_dy() - delta / 120.0 * 40.0))
-        if nuevo != self._ayuda_dy():
-            self._ayuda_scroll = nuevo
-            self._sincronizar()
-            if self.win is not None:
-                self.win.update()
-        return True
-
     def idioma_cambiado(self) -> None:
         """Otro idioma (Opciones): lo pintado se rehace; las ventanas ya hechas
         cambian al reabrirlas o al reiniciar IngeTrazo."""
-        self._ayuda_cache = None
         self._cache_sel = None
         self._etiqueta_w = None
         self._rehacer_dibujo()
@@ -2183,33 +2738,205 @@ class Cadena:
             _tr("Idioma cambiado. Algunas ventanas cambian al reabrirlas o al reiniciar IngeTrazo."), 6000)
         self._sincronizar()
 
-    # -- aplicar capa (el icono del cajetín de capas) --
-    def _capa_icono_en(self, p) -> bool:
-        if not self._capa_en(p):
-            return False
-        return p.x() <= self._rect_capa(self.ancla).left() + 26.0
+    # -- el cajetín de capa: zonas (en px de referencia: 180 de ancho) --
+    @staticmethod
+    def _capa_centros(r) -> dict:
+        """Los botones ④ hacer activa, ⑤ aislar y ⑥ bloquear."""
+        if not _edicion.con("capas_panel"):
+            return {}
+        k = r.width() / CAPA_REF_W
+        y = r.center().y()
+        return {"capa_activa": QPointF(r.right() - 64.0 * k, y),
+                "capa_aislar": QPointF(r.right() - 46.0 * k, y),
+                "capa_bloq": QPointF(r.right() - 28.0 * k, y)}
 
-    def _menu_aplicar_capa(self, viewport) -> None:
-        from PySide6.QtWidgets import QMenu
-        if self.ancla is None:
-            return
+    def _capa_zona(self, p):
+        """Qué parte del cajetín hay bajo ``p``: el icono (aplicar capa), un
+        botón o el nombre y el ▾ («capa»)."""
+        if not self._capa_en(p):
+            return None
         r = self._rect_capa(self.ancla)
-        pos = viewport.mapToGlobal(QPoint(round(r.left()), round(r.bottom()) + 2))
-        m = QMenu(self.app.window)
-        m.addSection(_tr("Aplicar capa"))
-        a = m.addAction(_tr("Aplicar la capa actual a lo que seleccione"))
-        a.setCheckable(True)
-        a.setChecked(self.aplicar_capa)
-        info = m.addAction(_tr("Capa actual: {0}", self.capas.actual(viewport.scene)))
-        info.setEnabled(False)
-        elegida = m.exec(pos)
-        self.tragar_clic()
-        if elegida is a:
-            self.aplicar_capa = a.isChecked()
-            self._ids_aplicados = frozenset()        # también lo ya seleccionado
-            viewport.flash_status(_tr("Aplicar capa: cada elemento que selecciones pasa a la capa "
-                                  "actual." if self.aplicar_capa else "Aplicar capa: desactivado."), 4000)
+        k = r.width() / CAPA_REF_W
+        if p.x() <= r.left() + 26.0 * k:
+            return "capa_aplicar"
+        for clave, q in self._capa_centros(r).items():
+            if abs(p.x() - q.x()) <= 9.0 * k:
+                return clave
+        return "capa"
+
+    def _estado_capa(self) -> tuple:
+        """``(activa, color, hay_sel, capa_sel, aislada, bloqueada, aplicar)``.
+        Los botones miran la capa de lo seleccionado (None: varias) o, sin
+        selección, la activa."""
+        vp = self.app.viewport
+        scene = vp.scene
+        act = _capas.activa(scene)
+        hay_sel = bool(scene.selection)
+        sel = self._datos_sel()[1] if hay_sel else None
+        obj = sel if hay_sel else act
+        return (act, _capas.color_de(scene, act), hay_sel, sel,
+                bool(obj) and _capas.aislada(vp, obj), bool(obj) and _capas.bloqueada(scene, obj),
+                self.aplicar_capa)
+
+    def _alternar_aplicar_capa(self, viewport) -> None:
+        """① Aplicar capa (2.49.0). Con algo seleccionado: pasa a la capa
+        activa, se deselecciona y sale un aviso. Sin selección: queda
+        encendido y cada cosa que se seleccione pasa a la capa activa, hasta
+        el clic derecho (o otro toque)."""
+        if self.aplicar_capa:
+            self._apagar_aplicar_capa(viewport)
+            return
+        if viewport.scene.selection:
+            self._ids_aplicados = frozenset()
+            self._aplicar_capa_a_nuevos(viewport)
+        else:
+            self.aplicar_capa = True
+            self._ids_aplicados = frozenset()
+            nombre = _capas.activa(viewport.scene)
+            viewport.flash_status(_tr("Aplicar capa: lo que selecciones pasa a la capa «{0}» · "
+                                      "clic derecho para terminar.", nombre), 6000)
         self._sincronizar()
+
+    def _apagar_aplicar_capa(self, viewport) -> None:
+        self.aplicar_capa = False
+        viewport.flash_status(_tr("Aplicar capa: apagado."), 2500)
+        self._sincronizar()
+
+    def _avisar_capa(self, viewport, n, nombre, total=None) -> None:
+        """El aviso pequeño de «n elementos → capa X», bajo el cajetín (o
+        junto al cursor si el rosco no se ve)."""
+        if not _edicion.con("aviso_capa"):
+            if n == 0:
+                texto = _tr("Ya estaba en la capa «{0}»", nombre)
+            elif n == 1:
+                texto = _tr("1 elemento → capa «{0}»", nombre)
+            else:
+                texto = _tr("{0} elementos → capa «{1}»", n, nombre)
+            viewport.flash_status(texto, 4000)
+            return
+        try:
+            from ._aviso import Aviso
+            if getattr(self, "_aviso", None) is None:
+                self._aviso = Aviso(self.app.window)
+            if self.ancla is not None and self.win is not None and self.win.isVisible():
+                r = self._rect_capa(self.ancla)
+                pos = self.win.mapToGlobal(QPoint(round(r.left()), round(r.bottom() + 6.0)))
+            else:
+                pos = QCursor.pos() + QPoint(18, 18)
+            if n == 0:
+                texto = _tr("Ya estaba en la capa «{0}»", nombre)
+            elif n == 1:
+                texto = _tr("1 elemento → capa «{0}»", nombre)
+            else:
+                texto = _tr("{0} elementos → capa «{1}»", n, nombre)
+            self._aviso.mostrar(texto, pos, _capas.color_de(viewport.scene, nombre))
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo enseñar el aviso de capa")
+
+    def _boton_capa(self, viewport, zona) -> None:
+        """④ hacer activa la capa de lo seleccionado, ⑤ aislar, ⑥ bloquear."""
+        act, _rgb, hay_sel, sel, _ai, _bl, _ap = self._estado_capa()
+        obj = sel if hay_sel else act
+        try:
+            if zona == "capa_activa":
+                if getattr(self, "_gotero", False):
+                    self._fin_gotero(viewport)        # otro clic: lo suelta
+                elif hay_sel and sel is not None and sel != act:
+                    _capas.hacer_activa(viewport, sel)
+                    viewport.flash_status(_tr("Capa activa: «{0}».", sel), 3000)
+                else:
+                    self._empezar_gotero(viewport)
+            elif obj is None:
+                viewport.flash_status(_tr("Lo seleccionado está en varias capas."), 3000)
+            elif zona == "capa_aislar":
+                _capas.aislar(viewport, obj)
+                viewport.flash_status(_tr("Capa «{0}» aislada.", obj) if _capas.aislada(viewport, obj)
+                                      else _tr("Se ven todas las capas."), 3000)
+            elif zona == "capa_bloq":
+                if _capas.bloquear(viewport, obj):
+                    nueva = _capas.activa(viewport.scene)
+                    viewport.flash_status(
+                        _tr("Capa «{0}» bloqueada.", obj) if nueva == act or obj != act
+                        else _tr("Capa «{0}» bloqueada: la activa pasa a «{1}».", obj, nueva), 4000)
+                else:
+                    viewport.flash_status(_tr("Capa «{0}» desbloqueada.", obj), 3000)
+        except Exception:  # noqa: BLE001
+            log.exception("fallo en el botón %s del cajetín de capa", zona)
+        self._cache_sel = None
+        self._sincronizar()
+
+    # -- el cuentagotas de capa (④ sin selección en otra capa) --
+    def _empezar_gotero(self, viewport) -> None:
+        """Queda esperando un clic en un objeto: su capa pasa a ser la
+        activa y el cuentagotas se suelta solo (Esc o clic derecho, nada)."""
+        if not _edicion.con("capas_panel"):
+            return
+        from ._capas_panel import cursor_gotero
+        self._gotero = True
+        QApplication.setOverrideCursor(cursor_gotero())
+        if not self.anclada:
+            self.escondida = True
+            self._tool_escondida = viewport.active_tool
+        viewport.setFocus()
+        viewport.flash_status(_tr("Cuentagotas: clic en un objeto y su capa pasará a ser la activa · "
+                                  "Esc cancela."), 8000)
+        self._sincronizar()
+
+    def _fin_gotero(self, viewport) -> None:
+        if not getattr(self, "_gotero", False):
+            return
+        self._gotero = False
+        QApplication.restoreOverrideCursor()
+        self.escondida = False
+        self._sincronizar()
+
+    def _evento_gotero(self, vp, t, ev) -> bool:
+        """Con el cuentagotas esperando: el clic izquierdo coge la capa de lo
+        que haya debajo; Esc o el derecho lo sueltan. True = evento tomado."""
+        if not getattr(self, "_gotero", False):
+            return False
+        if t == QEvent.Type.KeyPress and ev.key() == Qt.Key_Escape:
+            self._fin_gotero(vp)
+            vp.flash_status(_tr("Cuentagotas cancelado."), 2000)
+            return True
+        if t == QEvent.Type.MouseButtonPress and ev.button() == Qt.RightButton:
+            self._fin_gotero(vp)
+            self.tragar_clic()
+            return True
+        if t == QEvent.Type.MouseButtonPress and ev.button() == Qt.LeftButton:
+            p = ev.position()
+            ent = None
+            sel = self._select_nativo()
+            try:
+                if sel is not None and callable(getattr(sel, "_pick", None)):
+                    ent = sel._pick(vp, p.x(), p.y())
+                if ent is None:
+                    ent = vp.pick_group(p.x(), p.y())
+            except Exception:  # noqa: BLE001
+                log.exception("el cuentagotas no pudo mirar qué hay debajo")
+            self.tragar_clic()
+            self._fin_gotero(vp)
+            if ent is None:
+                vp.flash_status(_tr("Cuentagotas: ahí no hay nada; la capa activa no cambia."), 3000)
+                return True
+            nombre = _capas.capa_de(ent)
+            _capas.hacer_activa(vp, nombre)
+            vp.flash_status(_tr("Capa activa: «{0}».", nombre), 3000)
+            self._sincronizar()
+            return True
+        return False
+
+    def _globo_capa(self) -> None:
+        """Con el ratón sobre el nombre, el nombre entero de la capa activa."""
+        if self._bajo == "capa" and self.ancla is not None:
+            r = self._rect_capa(self.ancla)
+            vp = self.app.viewport
+            pos = vp.mapToGlobal(QPoint(round(r.left() + 30.0), round(r.bottom() + 4.0)))
+            QToolTip.showText(pos, _tr("Capa activa: {0}", _capas.activa(vp.scene)))
+            self._globo_puesto = True
+        elif getattr(self, "_globo_puesto", False):
+            QToolTip.hideText()
+            self._globo_puesto = False
 
     def _aplicar_capa_a_nuevos(self, viewport) -> None:
         scene = viewport.scene
@@ -2224,27 +2951,63 @@ class Cadena:
             return
         entidades = [e for e in seleccion if id(e) in nuevos]
         nombre = self.capas.actual(scene)
+        n = sum(1 for e in entidades if _capas.capa_de(e) != nombre)
         try:
-            if _capas.asignar(viewport, entidades, nombre):
-                viewport.flash_status(_tr("Capa «{0}»: {1} elemento(s).", nombre, len(entidades)), 2500)
+            _capas.asignar(viewport, entidades, nombre)
         except Exception:  # noqa: BLE001
             log.exception("no se pudo aplicar la capa")
+            return
+        # Se deselecciona: así se ve que ya está y la siguiente selección
+        # (clic o ventana) empieza de cero.
+        limpiar = getattr(scene, "clear_selection", None)
+        if callable(limpiar):
+            limpiar()
+            viewport.notify_scene_changed()
+        self._ids_aplicados = frozenset()
+        self._avisar_capa(viewport, n, nombre, len(entidades))
 
     def _menu_apagar(self, viewport, pos) -> None:
-        """Salir de IngeTrazo o reiniciarlo."""
+        """Salir de IngeTrazo, reiniciarlo o apagar Rosco."""
         from PySide6.QtWidgets import QMenu
         m = QMenu(self.app.window)
         salir = m.addAction(_tr("Salir de IngeTrazo"))
         reiniciar = m.addAction(_tr("Reiniciar IngeTrazo"))
+        m.addSeparator()
+        apagar = m.addAction(_tr("Apagar Rosco"))
         elegida = m.exec(pos)
         self.tragar_clic()
         if elegida is salir:
             QTimer.singleShot(0, self._cerrar_ingetrazo)
         elif elegida is reiniciar:
             self.diana.usar(viewport, "reiniciar")
+        elif elegida is apagar:
+            self._apagar_rosco()
+
+    def _apagar_rosco(self) -> None:
+        interruptor = getattr(self.app.window, atributo("interruptor"), None)
+        if interruptor is not None:
+            # Fuera del clic de la barra, que aún se está atendiendo.
+            QTimer.singleShot(0, interruptor.apagar)
+
+    def _clic_apagar(self, viewport, clave) -> None:
+        """El botón Apagar: un clic abre su desplegable, pasado el tiempo de
+        un doble clic; el segundo clic (``raton_doble``) apaga Rosco."""
+        if self._reloj_apagar is None:
+            self._reloj_apagar = QTimer(self.app.window)
+            self._reloj_apagar.setSingleShot(True)
+            self._reloj_apagar.timeout.connect(self._abrir_menu_apagar)
+        self._apagar_en = (viewport, self._bajo_chico(viewport, clave))
+        if self.ancla is not None and self.win is not None and self.win.isVisible():
+            self._abrir_despliegue("apagar")   # 1.9.0: en el anillo, sin menú
+            return
+        self._reloj_apagar.start(QApplication.doubleClickInterval())
+
+    def _abrir_menu_apagar(self) -> None:
+        viewport, pos = self._apagar_en
+        self._menu_apagar(viewport, pos)
 
     def _instalar_barra(self) -> None:
-        """El botón de la barra de dibujo en la barra «Rosco LT»."""
+        """El botón del anillo en la barra «Rosco»."""
         from ._barra import anadir
         win = self.app.window
         act = QAction(_icono_barra(win), _tr(TITULO), win)
@@ -2266,25 +3029,27 @@ class Cadena:
         return QPointF(p) if vp.rect().contains(p) else None
 
     def activar(self) -> None:
-        """Llamada a Rosco LT: sin herramienta elegida y con las opciones de cada
+        """Llamada a Rosco: sin herramienta elegida y con las opciones de cada
         botón como al principio (salvo Grupo, que se recuerda). Hasta que no
         se elija un botón, un clic fuera de la barra la cierra."""
         if _interruptor.apagada(self.app):
             return
         vp = self.app.viewport
         self.dormida = False                 # llamada: se despierta
+        self._despliegue = None              # sin opciones abiertas de la vez anterior
         self._obra = False
         self.base = None
         for clave, modos in MODOS.items():
             if clave != "grupo":
                 self.modo[clave] = modos[0]
+        self.modo["seleccionar"] = "ventana"     # selección normal, lazo apagado
         self.bases["rect"]._set_from_center(vp, False)
         vp.set_active_tool(self.herramienta)
         self.arco_visible = True
         self._soltar()
         aqui = None if self.anclada else self._cursor_en_visor()
         if aqui is not None:
-            # Llamado desde otra barra (la barra de modificar): la barra aparece ya fija
+            # Llamado desde otra barra (el arco de modificar): la barra aparece ya fija
             # donde está el ratón, para elegir una herramienta.
             self.cursor_px = aqui
             self.fijo = True
@@ -2310,6 +3075,14 @@ class Cadena:
         self._altura_pendiente = False
         if viewport.active_tool is not tool:
             return                           # el usuario cambió de herramienta
+        if self.solo_2d and getattr(tool, "clave", None) in CONSTRUYEN:
+            # 1.6.0: «Solo 2D»: la figura se queda plana; «al terminar» vale igual.
+            if self._antes is not None and self.modo["grupo"] != "nada":
+                self._agrupar(viewport)
+            self.olvidar_antes()
+            self._orden_hecha(viewport)
+            viewport.flash_status(_tr("Figura plana (Solo 2D): no pasa a Empujar."), 3000)
+            return
         cara = _cara_con_puntos(viewport.scene.mesh, puntos)
         if cara is None and silencioso:
             self.olvidar_antes()
@@ -2386,7 +3159,7 @@ class Cadena:
 
     def _preparar_seleccionar(self) -> None:
         """El Seleccionar de IngeTrazo: selección múltiple y, sin nada
-        seleccionado, clic en vacío = la barra de dibujo, doble clic = repetir."""
+        seleccionado, clic en vacío = el anillo, doble clic = repetir."""
         nativo = self._select_nativo()
         _seleccion.hacer_multiple(nativo)
         _seleccion.hacer_vacio(self, nativo)
@@ -2412,7 +3185,7 @@ class Cadena:
         if antes is None:
             return
         if viewport.scene.edit_group is not None:
-            viewport.flash_status(_tr("Rosco LT: dentro de un grupo abierto no se puede "
+            viewport.flash_status(_tr("Rosco: dentro de un grupo abierto no se puede "
                                   "agrupar; la pieza queda suelta."), 5000)
             return
         caras_antes, aristas_antes = antes
@@ -2427,10 +3200,10 @@ class Cadena:
             n = len(viewport.scene.groups) + 1
             titulo = "Componente" if componente else "Grupo"
             nombre, ok = QInputDialog.getText(
-                self.app.window, "Rosco LT · {0}".format(_tr(titulo.lower())),
-                _tr("Nombre del {0}:", _tr(titulo.lower())), text=f"{_tr(titulo)} {n}")
+                self.app.window, _tr("Rosco · {0}", titulo.lower()),
+                _tr("Nombre del {0}:", titulo.lower()), text=f"{titulo} {n}")
             if not ok:
-                viewport.flash_status(_tr("Rosco LT: sin nombre, la pieza queda suelta."), 4000)
+                viewport.flash_status(_tr("Rosco: sin nombre, la pieza queda suelta."), 4000)
                 return
             nombre = nombre.strip() or f"{titulo} {n}"
         from core.history import MakeGroupCommand
@@ -2439,7 +3212,7 @@ class Cadena:
         error = viewport.history.last_error
         viewport.notify_scene_changed()
         if error:
-            viewport.flash_status(_tr("Rosco LT: no se pudo agrupar: {0}", error), 6000)
+            viewport.flash_status(_tr("Rosco: no se pudo agrupar: {0}", error), 6000)
         else:
             viewport.flash_status(_tr("Componente creado. Ctrl+Z lo deshace." if componente
                                   else "Grupo creado. Ctrl+Z lo deshace."), 4000)
@@ -2514,12 +3287,10 @@ class Cadena:
         return True
 
     def _campos_edicion(self, viewport):
-        """Desplazar, Rotar, Escalar y compañía, con su opción encendida: un
-        renglón con el rótulo de su propio cuadro de medidas, tras el primer
-        punto. Sin la opción siguen con lo tecleado en el visor."""
-        if not _seleccion.opcion("dictado_edicion"):
-            return None
-        barra = self._barra_modificar()
+        """Desplazar, Rotar, Escalar, Empujar/tirar y compañía: un renglón con
+        el rótulo de su propio cuadro de medidas, tras el primer punto. 3.3.0:
+        siempre (la opción «dictado de edición» solo decide si se dicta)."""
+        barra = self._arco_modificar()
         tool = viewport.active_tool
         if barra is None or not callable(getattr(tool, "on_value", None)):
             return None
@@ -2547,6 +3318,63 @@ class Cadena:
             return v is not None and self._aplicar_valor(viewport, tool, v)
         return (EDICION_CON_MEDIDA[clave], [etiqueta], aplicar)
 
+    def _campos_nativa(self, viewport, tool):
+        """3.3.0: cualquier otra orden de IngeTrazo (o de una extensión) que
+        acepte medidas tecleadas (transportador, sígueme…), ya a medias: un
+        renglón con el rótulo de su propio cuadro de medidas."""
+        if (tool is None or self._es_base(tool) or tool is self.push
+                or type(tool).__name__ == "MultiTool"
+                or not callable(getattr(tool, "on_value", None))
+                or not self._en_marcha(viewport)):
+            return None
+        etiqueta = self._etiqueta_vcb(tool)
+        rotulo = etiqueta.lower()
+        sin_unidad = any(s in rotulo for s in ("ngulo", "grado", "escala", "factor", "angle", "scale",
+                                               "lados", "segment", "sides"))
+
+        def aplicar(textos):
+            texto = textos[0] if textos else ""
+            if not texto:
+                return False
+            if sin_unidad:
+                from ._medidas import calcular
+                try:
+                    return self._aplicar_valor(viewport, tool, calcular(texto))
+                except Exception:  # noqa: BLE001 — una cuenta mal escrita
+                    return False
+            v = self._parsear(texto)
+            return v is not None and self._aplicar_valor(viewport, tool, v)
+        nombre = str(getattr(tool, "name", "") or "IngeTrazo").replace(con_nombre("Rosco · "), "")
+        try:
+            from core.i18n import tr
+            nombre = tr(nombre)
+        except Exception:  # noqa: BLE001
+            pass
+        nombre = {"Protractor": "Transportador", "Follow Me": "Sígueme"}.get(nombre, nombre)
+        return (nombre[:1].upper() + nombre[1:], [etiqueta], aplicar)
+
+    def _campos_multiempuje(self, viewport, tool):
+        """3.3.0: Multiempuje, con caras elegidas o arrastrando: la distancia."""
+        if type(tool).__name__ != "MultiTool" or not callable(getattr(tool, "on_value", None)):
+            return None
+        try:
+            activo = tool.estado in ("arrastre", "libre") or (tool.estado == "sel" and tool._hay_elegidas())
+        except Exception:  # noqa: BLE001
+            return None
+        if not activo:
+            return None
+
+        def aplicar(textos):
+            v = self._parsear(textos[0]) if textos and textos[0] else None
+            if v is None:
+                return False
+            try:
+                return bool(tool.on_value(viewport, v))
+            except Exception:  # noqa: BLE001
+                log.exception("Multiempuje no aceptó la distancia")
+                return False
+        return ("Multiempuje · distancia", ["Distancia"], aplicar)
+
     def _campos(self, viewport, tecleando: bool = False):
         """``(título, renglones, aplicar)`` para lo que se está haciendo, o
         None si ahora no hay ninguna medida que pedir. ``tecleando``: se
@@ -2561,9 +3389,15 @@ class Cadena:
 
         if tool is self.push and self.push.dragging:
             return ("Altura (empujar / tirar)", ["Altura"], una)
+        multi = self._campos_multiempuje(viewport, tool)
+        if multi is not None:
+            return multi
         edicion = self._campos_edicion(viewport)
         if edicion is not None:
             return edicion
+        nativa = self._campos_nativa(viewport, tool)
+        if nativa is not None:
+            return nativa
         clave_lados = getattr(tool, "clave", None)
         if (tecleando and self._es_base(tool) and not self.ocupada(tool)
                 and clave_lados in LIMITES_LADOS):
@@ -2619,9 +3453,18 @@ class Cadena:
         if tool is self.bases["linea"]:
             return ("Línea", ["Longitud"], una)
         # El resto (arcos, cota, cinta, equidistancia, redondeo): un renglón
-        # con el rótulo del cuadro de medidas de la propia herramienta.
-        titulo = f"{NOMBRES.get(clave, 'Rosco LT')} ·{self.modo.get(clave) or ''}".rstrip(" ·")
-        return (titulo, [self._etiqueta_vcb(tool)], una)
+        # con el rótulo del cuadro de medidas de la propia herramienta. 3.3.0:
+        # el título, el de la orden de verdad (no el último modo del botón).
+        return (self._titulo_orden(tool, clave), [self._etiqueta_vcb(tool)], una)
+
+    def _titulo_orden(self, tool, clave) -> str:
+        k = next((k for k, t in self.por_modo.items() if t is tool), None)
+        boton, modo = k if k is not None else (clave, self.modo.get(clave) or "")
+        nombre = str(NOMBRES.get(boton, con_nombre("Rosco"))).split(":")[0].strip()
+        modo = str(modo or "").strip()
+        if not modo or modo.lower() == nombre.lower():
+            return nombre
+        return f"{nombre} · {modo}"
 
     @staticmethod
     def _etiqueta_vcb(tool) -> str:
@@ -2659,7 +3502,7 @@ class Cadena:
                 return [fmt_len(abs(tool.distancia))]
             if getattr(tool, "clave", "") in ("arco", "medir") or tool in (
                     self.por_modo[("linea", "equidist.")],
-                    self.por_modo[("linea", "redondear")]):
+                    self.por_modo[("empujar", "redondear 3D")]):
                 etiqueta_valor = tool.value_label() if hasattr(tool, "value_label") else None
                 return [etiqueta_valor[0]] if etiqueta_valor else []
             hover = getattr(tool, "hover_point", None)
@@ -2702,6 +3545,13 @@ class Cadena:
             m.abrir(titulo, campos, "", aplicar)
         else:
             m._aplicar = aplicar
+        # 1.6.0: «Solo 2D» en el título, con las bases que pasan a Empujar.
+        tool = viewport.active_tool
+        try:
+            m.poner_2d(self._es_base(tool) and getattr(tool, "clave", None) in CONSTRUYEN,
+                       self.solo_2d, self._poner_solo_2d)
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo poner la casilla Solo 2D")
         m.poner_actuales(self._actuales(viewport))
         self._dictado_tras_punto(viewport, m)
         m.seguir()
@@ -2742,6 +3592,7 @@ class Cadena:
         # Las bandas se recorren de a0 + barrido a a0: arriba eso es de
         # izquierda a derecha; abajo, al revés, así que se les da la vuelta.
         T = self.tema
+        return self._bandas_dos()
         if T.rueda:
             return tuple(b[1:] for b in self.bandas_de(T))
         arriba_int = T.arriba_int or BASES
@@ -2753,7 +3604,534 @@ class Cadena:
                 (abajo_int, T.r1[0], T.r1[1], T.a_abajo, T.tam1),
                 (abajo_ext, T.r2[0], T.r2[1], T.a_abajo, T.tam_abajo_ext or T.tam2))
 
-    # -- los huecos configurables (el gestor de barras ▸ Barra Rosco LT) --
+    def _bandas_dos(self) -> tuple:
+        """Los dos anillos como bandas: ``(claves, r_int, r_ext, a0, tam,
+        barrido)``: el de dentro entero; el de fuera, en dos (arriba y abajo
+        de los ojos). Se recorren de ``a0 + barrido`` a ``a0``."""
+        T = self.tema
+        p = PASO_FUERA
+        arriba, abajo = ANILLO_FUERA[1:8], ANILLO_FUERA[9:]
+        tam_d = min(T.tam1, 0.8 * (T.r1[0] + T.r1[1]) / 2.0 * math.radians(PASO_DENTRO))
+        tam_f = min(T.tam2, 0.8 * (T.r2[0] + T.r2[1]) / 2.0 * math.radians(p))
+        return ((ANILLO_DENTRO, T.r1[0], T.r1[1], 90.0 + PASO_DENTRO / 2.0 - 360.0, tam_d, 360.0),
+                (arriba, T.r2[0], T.r2[1], OJO_DER_A + p / 2.0, tam_f, p * len(arriba)),
+                (abajo, T.r2[0], T.r2[1], OJO_IZQ_A + p / 2.0 - 360.0, tam_f, p * len(abajo)))
+
+    # -- las opciones en el mismo anillo (el despliegue) --
+    def _tiene_despliegue(self, clave) -> bool:
+        if clave in ("apagar", "limpia"):    # 1.9.0: el botoncito, sus opciones en el anillo (3.2.0: y Pantalla limpia)
+            return True
+        if clave in ("seccion", "camara"):   # 1.5.0: el gajo de la rueda; 3.1.0: la cámara
+            return self._rueda_abierta()
+        if not isinstance(clave, str) or clave not in (*ANILLO_DENTRO, *ANILLO_FUERA) or not clave:
+            return False
+        if clave in SUB_PROPIA:
+            return bool(SUB_PROPIA[clave])
+        if clave in UNIDOS or clave in ("texto", "flip", "invertir"):
+            return True
+        try:
+            return len(self._opciones(clave) or ()) > 1
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _opciones_anillo(self, clave) -> list:
+        """Las opciones de la subbarra de ``clave``: las de serie o, si se
+        personalizó en el gestor de barras (1.11.0), las suyas en su orden."""
+        base = self._opciones_anillo_base(clave)
+        propia = SUB_PROPIA.get(clave)
+        if propia is None:
+            return base
+        por = {(o[0], o[1]): o for o in base}
+        salida = []
+        for tipo, valor in propia:
+            o = por.get((tipo, valor))
+            if o is not None:
+                salida.append(o)
+            elif tipo == "accion":           # un comando del árbol del gestor de barras
+                try:
+                    texto = self._texto_icono(valor)
+                except Exception:  # noqa: BLE001
+                    texto = valor
+                salida.append(("accion", valor, texto, valor, False))
+        return salida
+
+    def _aplicar_anillos(self) -> None:
+        """1.11.0: lo que va en los dos anillos y las subbarras, del grupo
+        de huecos activo (``_anillos2``)."""
+        global ANILLO_DENTRO, ANILLO_FUERA
+        if not _edicion.con("anillos2"):     # los de serie, sin personalizar
+            SUB_PROPIA.clear()
+            VERDES_PROPIOS.clear()
+            self._despliegue = None
+            return
+        from . import _anillos2
+        try:
+            cfg = _anillos2.leer(self.huecos.id_activo)
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudieron leer los anillos")
+            cfg = _anillos2.defecto()
+        ANILLO_DENTRO = tuple(cfg["dentro"])
+        ANILLO_FUERA = tuple(cfg["fuera"])
+        SUB_PROPIA.clear()
+        VERDES_PROPIOS.clear()
+        for clave, sub in cfg["sub"].items():
+            SUB_PROPIA[clave] = [tuple(x) for x in sub["o"]] + [tuple(x) for x in sub["c"]]
+            VERDES_PROPIOS[clave] = {x[1] for x in sub["c"]}
+        self._despliegue = None
+
+    def _opciones_anillo_base(self, clave) -> list:
+        """``[(tipo, valor, texto, icono, actual)]``: tipo «modo» (orden del
+        botón), «fin» (al terminar) o «accion» (otra orden de la barra)."""
+        if clave in UNIDOS:
+            act = self.modo.get(clave, UNIDOS_DEF[clave])
+            return [("accion", k, t, ic, k == act) for k, t, ic in UNIDOS[clave]
+                    if k != UNIDOS_PROPIA.get(clave)]
+        if clave == "invertir":
+            return [("accion", "explotar", "explotar", "explotar", False)]
+        if clave == "limpia":
+            # 3.2.0: Pantalla limpia por partes, interruptores en el anillo.
+            from ._limpia import PARTES
+            limpia = self._limpieza()
+            iconos = {"menus": "l_menus", "barras": "l_barras", "estado": "l_estado",
+                      "paneles": "l_paneles"}
+            textos = {"menus": "menús", "barras": "barras de\nherramientas", "estado": "barra de\nestado",
+                      "paneles": "paneles\nlaterales"}
+            salida = []
+            for parte, _t in PARTES:
+                quitado = limpia.esta_quitado(parte)
+                salida.append(("limpia", parte, ("mostrar " if quitado else "quitar ") + textos[parte],
+                               iconos[parte], quitado))
+            todo = limpia.todo_quitado()
+            salida.append(("limpia", "todo", "mostrar\ntodo" if todo else "quitar\ntodo", "limpia", todo))
+            return salida
+        if clave == "apagar":
+            return [("accion", "cerrar_app", "salir de IngeTrazo", "cerrar_app", False),
+                    ("accion", "reiniciar", "reiniciar IngeTrazo", "reiniciar", False),
+                    ("accion", "apagar_rosco", "apagar Rosco", "interruptor", False)]
+        if clave == "camara":
+            # 3.1.0: las herramientas de cámara de IngeTrazo, en los gajos de la rueda.
+            tools = getattr(self.app.window, "_tools", None) or {}
+            activa = self.app.viewport.active_tool
+            return [("camara", k, CAMARA_OPCIONES[k], k,
+                     activa is not None and tools.get(_diana.CAMARA_HERR[k]) is activa)
+                    for k in CAMARA_OPCIONES]
+        if clave == "seccion":
+            # Interruptores del menú Ver: planos, cortes y relleno de sección.
+            return [("seccion", k, SECCION_OPCIONES[k], SECCION_ICONOS[k], self._seccion_marcada(k))
+                    for k in SECCION_OPCIONES]
+        if clave == "flip":
+            # Simetría: cómo se elige el plano y la copia (los ejes, con las
+            # flechas: en el anillo de dentro no caben).
+            sim = getattr(self, "simetria", None)
+            return [("simetria", k, TEXTO_FLIP[k], ICONO_FLIP.get(k),
+                     sim.marcado(k) if sim is not None else k == "cursor")
+                    for k in (*MODOS_FLIP, "copia")]
+        act = self.modo.get(clave)
+        # La primera es la orden propia del botón: no se repite (la hace el
+        # clic en el botón).
+        salida = [("modo", m, TEXTO_MODO.get((clave, m), m), self._icono_modo(clave, m), m == act)
+                  for m in tuple(self._opciones(clave) or ())[1:]]
+        if clave == "texto":
+            salida.append(("accion", "notas", "notas\n(tareas)", "notas", False))
+        if clave == "seleccionar" and _edicion.con("sel_rapida"):   # 3.1.0: la ventana de Selección rápida
+            salida.append(("accion", "sel_rapida", "selección\nrápida", "sel_rapida", False))
+        if clave in CONSTRUYEN:
+            fin = self._final_actual()
+            salida += [("fin", k, "grupo\ncon nombre" if k == "con nombre" else k,
+                        ICONO_MODO.get(("fin", k)), k == fin) for k in FINALES]
+        return salida
+
+    @staticmethod
+    def _icono_modo(clave, m):
+        """El icono de una orden de un botón; las de sub-submenú (Estirar),
+        el de la que está puesta (1.9.0)."""
+        icono = ICONO_MODO.get((clave, m))
+        if icono is None and _subsub.tiene(clave, m):
+            icono = _subsub.icono(_subsub.cara(clave, m))
+        return icono
+
+    @staticmethod
+    def _anillo_de(clave):
+        return ("dentro", ANILLO_DENTRO) if clave in ANILLO_DENTRO else ("fuera", ANILLO_FUERA)
+
+    @staticmethod
+    def _angulo_hueco(anillo, i) -> float:
+        return 90.0 - i * PASO_DENTRO if anillo == "dentro" else OJO_IZQ_A - i * PASO_FUERA
+
+    @staticmethod
+    def _paso_anillo(anillo) -> float:
+        return PASO_DENTRO if anillo == "dentro" else PASO_FUERA
+
+    def _radios_anillo(self, anillo):
+        return self.tema.r1 if anillo == "dentro" else self.tema.r2
+
+    def _cubiertos(self) -> dict:
+        """``{(anillo, hueco): índice de la opción}`` del despliegue abierto."""
+        clave = self._despliegue
+        if clave is None:
+            return {}
+        if clave in ("apagar", "limpia"):
+            chicos = self._chicos()
+            if clave not in chicos:
+                return {}
+            a = chicos[clave]
+
+            def dif_a(i):
+                return (self._angulo_hueco("fuera", i) - a + 180.0) % 360.0 - 180.0
+            n_ops = len(self._opciones_anillo(clave))
+            cerca = sorted((i for i in range(len(ANILLO_FUERA)) if i not in OJOS_FUERA),
+                           key=lambda i: abs(dif_a(i)))[:n_ops]
+            cerca.sort(key=lambda i: -dif_a(i))
+            return {("fuera", i): k for k, i in enumerate(cerca)}
+        if clave == "camara":
+            if "camara" not in _diana.RUEDA_BOTONES or not self._rueda_abierta():
+                return {}
+            base = _diana.RUEDA_BOTONES["camara"]
+            n = len(_diana.RUEDA_GAJOS)
+
+            def dif(i):
+                return (90.0 + _diana.RUEDA_PASO * i - base + 180.0) % 360.0 - 180.0
+            cerca = sorted(range(n), key=lambda i: abs(dif(i)))[:min(len(self._opciones_anillo(clave)), n)]
+            cerca.sort(key=dif)
+            return {("rueda", i): k for k, i in enumerate(cerca)}
+        if clave == "seccion":
+            n = len(_diana.RUEDA_GAJOS)
+            if clave not in _diana.RUEDA_GAJOS or not self._rueda_abierta():
+                return {}
+            i0 = _diana.RUEDA_GAJOS.index(clave)
+            return {("rueda", (i0 + 1 + k) % n): k
+                    for k in range(min(len(self._opciones_anillo(clave)), n - 1))}
+        anillo, lista = self._anillo_de(clave)
+        opciones = self._opciones_anillo(clave)
+        # 1.3.0: con el botón en el anillo de fuera, «al terminar» (nada,
+        # grupo, componente, grupo con nombre) va al de dentro.
+        fuera = anillo == "fuera"
+        normales = [i for i, o in enumerate(opciones) if not (fuera and o[0] == "fin")]
+        finales = [i for i, o in enumerate(opciones) if fuera and o[0] == "fin"]
+        n = len(lista)
+        j = lista.index(clave)
+        paso = -1 if clave in HACIA_ATRAS else 1
+        salida = {}
+        for idx in normales:
+            j = (j + paso) % n
+            while anillo == "fuera" and j in OJOS_FUERA:
+                j = (j + paso) % n       # los ojos se quedan
+            if lista[j] == clave:
+                break                    # dio la vuelta entera
+            salida[(anillo, j)] = idx
+        if finales:
+            # Los huecos de dentro más cerca del botón, de izquierda a derecha.
+            a = self._angulo_hueco(anillo, lista.index(clave))
+
+            def dif(i):
+                return (self._angulo_hueco("dentro", i) - a + 180.0) % 360.0 - 180.0
+            cerca = sorted(range(len(ANILLO_DENTRO)), key=lambda i: abs(dif(i)))[:len(finales)]
+            cerca.sort(key=lambda i: -dif(i))
+            for i, idx in zip(cerca, finales):
+                salida[("dentro", i)] = idx
+        return salida
+
+    def _hueco_en(self, p):
+        """``(anillo, hueco)`` bajo ``p``, o None."""
+        if self.ancla is None or p is None:
+            return None
+        dx, dy = p.x() - self.ancla.x(), self.ancla.y() - p.y()
+        r = math.hypot(dx, dy)
+        ang = math.degrees(math.atan2(dy, dx))
+        for anillo in ("dentro", "fuera"):
+            r0, r1 = self._radios_anillo(anillo)
+            if r0 - TOLERANCIA <= r <= r1 + TOLERANCIA:
+                a0 = 90.0 if anillo == "dentro" else OJO_IZQ_A
+                n = len(ANILLO_DENTRO if anillo == "dentro" else ANILLO_FUERA)
+                return anillo, int(round((a0 - ang) / self._paso_anillo(anillo))) % n
+        return None
+
+    def _sector_opcion(self, c, idx):
+        for (anillo, i), k in self._cubiertos().items():
+            if k == idx and anillo == "rueda":
+                return _diana._rueda_gajo(self._diana_centro(c), i, _diana.RUEDA_R)
+            if k == idx:
+                r0, r1 = self._radios_anillo(anillo)
+                paso = self._paso_anillo(anillo)
+                return sector(c, r0, r1, self._angulo_hueco(anillo, i) - paso / 2.0, paso)
+        return None
+
+    def _rotulos_despliegue(self, c) -> list:
+        """Los nombres de las opciones del anillo de fuera, por fuera de él:
+        ``[(caja, texto, color, negrita)]``. Desde la 1.1.0 no se pintan: el
+        nombre sale arriba del rosco al pasar, como el de los demás botones."""
+        if self._despliegue is None or not ROTULOS_FUERA:
+            return []
+        opciones = self._opciones_anillo(self._despliegue)
+        fuente = QFont(self.win.font() if self.win is not None else QFont())
+        fuente.setPixelSize(12)
+        fm = QFontMetricsF(fuente)
+        salida = []
+        r_ext = self.tema.r2[1]
+        for (anillo, i), idx in self._cubiertos().items():
+            if anillo != "fuera":
+                continue
+            tipo, _valor, texto, _icono, actual = opciones[idx]
+            texto = _tr(texto).replace("\n", " ")
+            a = self._angulo_hueco(anillo, i)
+            ar = math.radians(a)
+            # Arriba van los botoncitos redondos: por fuera de ellos (y, cerca de
+            # la vertical, alternando la distancia para que no se pisen).
+            r = r_ext + 9.0
+            if math.sin(ar) > 0.2:
+                r = r_ext + 2.0 * CHICO_R + 8.0
+            elif math.sin(ar) < -0.2 and abs(math.cos(ar)) < 0.45:
+                r = r_ext + 2.0 * OJO_R + 12.0     # abajo, por fuera del ojo rojo
+            if abs(math.cos(ar)) < 0.55 and i % 2:
+                r += 18.0
+            q = QPointF(c.x() + r * math.cos(ar), c.y() - r * math.sin(ar))
+            w, h = fm.horizontalAdvance(texto) + 10.0, fm.height() + 4.0
+            cos = math.cos(ar)
+            if cos < -0.3:
+                caja = QRectF(q.x() - w, q.y() - h / 2.0, w, h)
+            elif cos > 0.3:
+                caja = QRectF(q.x(), q.y() - h / 2.0, w, h)
+            elif math.sin(ar) > 0:
+                caja = QRectF(q.x() - w / 2.0, q.y() - h, w, h)
+            else:
+                caja = QRectF(q.x() - w / 2.0, q.y(), w, h)
+            color = ROJO if actual else (QColor(40, 80, 170) if tipo == "fin" else TINTA)
+            salida.append((caja, texto, color, actual))
+        return salida
+
+    def _pintar_despliegue(self, painter, c) -> None:
+        """Las opciones del botón, en los huecos que le siguen."""
+        from . import _rosco
+        T = self.tema
+        opciones = self._opciones_anillo(self._despliegue)
+        cub = self._cubiertos()
+        if not cub:
+            return
+        painter.save()
+        try:
+            # Los demás botones de los dos anillos, en gris (siguen funcionando).
+            for anillo, lista in (("dentro", ANILLO_DENTRO), ("fuera", ANILLO_FUERA)):
+                for i, k in enumerate(lista):
+                    if not k or k == self._despliegue or (anillo, i) in cub:
+                        continue
+                    s = self._sector_de(c, k)
+                    if s is not None:
+                        painter.fillPath(s, QBrush(GRIS_DESPLIEGUE))
+            # Las opciones: rosa (otra orden; la puesta, en rojo) o verde
+            # (complemento; el puesto, en un verde más fuerte), solo el icono.
+            for (anillo, i), idx in cub.items():
+                tipo, _valor, texto, icono, actual = opciones[idx]
+                r0, r1 = self._radios_anillo(anillo)
+                paso = self._paso_anillo(anillo)
+                a = self._angulo_hueco(anillo, i)
+                g = _rosco.Gajo(c, r0, r1, a - paso / 2.0, paso)
+                verde = es_complemento(self._despliegue, tipo, _valor)
+                _rosco._gajo(painter, g, "", actual and not verde, None, None, T.relieve, 1.0)
+                if verde:
+                    painter.fillPath(g.path, QBrush(VERDE_COMPLEMENTO_ACTIVO if actual else VERDE_COMPLEMENTO))
+                elif not actual:
+                    painter.fillPath(g.path, QBrush(ROSA_DESPLIEGUE))
+                if icono and _iconos.tiene(icono):
+                    # Lo más grande que quepa en el hueco (alto y ancho).
+                    rm = (r0 + r1) / 2.0
+                    lado = min((r1 - r0) * 0.92, 2.0 * rm * math.sin(math.radians(paso / 2.0)) * 0.95)
+                    pintar_icono_opcion(painter, icono, g.center(), lado)
+            # Dónde empiezan y acaban (rayas rojas).
+            # (1.3.0: cada anillo con las suyas: las opciones pueden ir en los dos).
+            painter.setPen(QPen(ROJO, 2.6))
+            for anillo in ("fuera", "dentro"):
+                grupo = [i for an, i in cub if an == anillo]
+                if not grupo:
+                    continue
+                r0, r1 = self._radios_anillo(anillo)
+                paso = self._paso_anillo(anillo)
+                base = self._angulo_hueco(anillo, grupo[0])
+                rel = [(self._angulo_hueco(anillo, i) - base + 180.0) % 360.0 - 180.0 for i in grupo]
+                for borde in (base + max(rel) + paso / 2.0, base + min(rel) - paso / 2.0):
+                    a = math.radians(borde)
+                    painter.drawLine(QPointF(c.x() + (r0 - 2) * math.cos(a), c.y() - (r0 - 2) * math.sin(a)),
+                                     QPointF(c.x() + (r1 + 2) * math.cos(a), c.y() - (r1 + 2) * math.sin(a)))
+            # Los nombres por fuera, en una pastilla blanca.
+            f = QFont(painter.font())
+            f.setPixelSize(12)
+            for caja, texto, color, negrita in self._rotulos_despliegue(c):
+                f.setBold(negrita)
+                painter.setFont(f)
+                painter.setPen(QPen(QColor(200, 200, 196), 1.0))
+                painter.setBrush(QColor(255, 255, 255, 235))
+                painter.drawRoundedRect(caja, 6.0, 6.0)
+                painter.setPen(color)
+                painter.drawText(caja, Qt.AlignCenter, texto)
+        finally:
+            painter.restore()
+
+    def _pintar_desp_rueda(self, painter, dc) -> None:
+        """1.5.0: las opciones del Plano de sección en los gajos de al lado
+        de la rueda (rosa, solo el icono; la encendida, en rojo) y los demás
+        gajos en gris. 3.1.0: también las de la Cámara (órdenes: en rosa,
+        como las subbarras del rosco; la puesta, con el borde rojo)."""
+        from . import _rosco
+        clave = self._despliegue
+        opciones = self._opciones_anillo(clave)
+        cub = {i: k for (an, i), k in self._cubiertos().items() if an == "rueda"}
+        r = _diana.RUEDA_R
+        _rb, _rc, ri, re = _diana._rueda_radios(r)
+        painter.save()
+        try:
+            for i, parte in enumerate(_diana.RUEDA_GAJOS):
+                g = _diana._rueda_gajo(dc, i, r)
+                if clave == "camara" and i in cub:
+                    _tipo, _v, _t, icono, actual = opciones[cub[i]]
+                    painter.fillPath(g, QBrush(BLANCO))
+                    painter.fillPath(g, QBrush(ROSA_DESPLIEGUE))
+                    painter.setPen(QPen(ROJO, 2.4 if actual else 1.3))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawPath(g)
+                    a = math.radians(90.0 + _diana.RUEDA_PASO * i)
+                    rm = (ri + re) / 2.0
+                    pintar_icono_opcion(painter, icono,
+                                        QPointF(dc.x() + rm * math.cos(a), dc.y() - rm * math.sin(a)),
+                                        min((re - ri) * 0.85, 34.0))
+                elif clave == "camara":
+                    painter.fillPath(g, QBrush(GRIS_DESPLIEGUE))
+                elif parte == "seccion":
+                    t = QColor(ROJO)
+                    t.setAlphaF(0.18)
+                    painter.fillPath(g, QBrush(t))
+                    painter.setPen(QPen(ROJO, 2.2))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawPath(g)
+                elif i in cub:
+                    _tipo, _v, _t, icono, actual = opciones[cub[i]]
+                    painter.fillPath(g, QBrush(BLANCO))
+                    painter.fillPath(g, QBrush(VERDE_COMPLEMENTO_ACTIVO if actual else VERDE_COMPLEMENTO))
+                    painter.setPen(QPen(QColor(60, 140, 70) if actual else QColor(150, 190, 155),
+                                        1.6 if actual else 1.0))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawPath(g)
+                    a = math.radians(90.0 + _diana.RUEDA_PASO * i)
+                    rm = (ri + re) / 2.0
+                    lado = min((re - ri) * 0.85, 34.0)
+                    pintar_icono_opcion(painter, icono,
+                                        QPointF(dc.x() + rm * math.cos(a), dc.y() - rm * math.sin(a)), lado)
+                else:
+                    painter.fillPath(g, QBrush(GRIS_DESPLIEGUE))
+            if clave == "camara" and "camara" in _diana.RUEDA_BOTONES:
+                # El botón de la cámara, marcado mientras sus órdenes están fuera.
+                _diana._boton_aro_pintar(painter, "camara", _diana.rueda_centro_boton(dc, "camara", r),
+                                         marcado=True)
+        finally:
+            painter.restore()
+
+    def _abrir_despliegue(self, clave) -> None:
+        self._parar_cierre()
+        if clave != self._despliegue:
+            sonar_despliegue()
+        self._despliegue = clave
+        self._sincronizar()
+
+    def _cerrar_despliegue(self) -> None:
+        self._parar_cierre()
+        if self._despliegue is not None:
+            self._despliegue = None
+            self._sincronizar()
+
+    def _poner_orden_propia(self, clave) -> None:
+        """Clic en un botón con opciones: su orden propia (la primera), que ya
+        no sale entre las opciones."""
+        if clave == "flip":
+            return                           # sus opciones no son órdenes del botón
+        try:
+            propia = (tuple(self._opciones(clave) or ()) or (None,))[0]
+            if propia is None:
+                return
+            if clave in _seleccion.SEMI:
+                barra = self._arco_modificar()
+                if barra is not None:
+                    barra.modo[clave] = propia
+                return
+            if self.modo.get(clave) != propia:
+                self.modo[clave] = propia
+                self._guardar_ultimas()
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo poner la orden propia de %s", clave)
+
+    def _elegir_simetria(self, viewport, k) -> bool:
+        """Una opción de Simetría: «copia» se enciende o apaga y las opciones
+        siguen abiertas; un modo pone la Simetría con él y el rosco se quita
+        hasta acabarla."""
+        if getattr(self, "simetria", None) is None:
+            from ._simetria import Simetria
+            self.simetria = Simetria(self)
+        if k == "copia":
+            try:
+                self.simetria.elegir(viewport, k)
+            except Exception:  # noqa: BLE001
+                log.exception("no se pudo cambiar la copia de la Simetría")
+            self._sincronizar()
+            return True
+        self._despliegue = None
+        self._previa = None
+
+        def poner():
+            self._activar_simetria(viewport, False)
+            try:
+                self.simetria.elegir(viewport, k)
+            except Exception:  # noqa: BLE001
+                log.exception("no se pudo elegir %s en la Simetría", k)
+            self._esconder_para_orden(viewport)
+        QTimer.singleShot(0, poner)
+        self._sincronizar()
+        return True
+
+    def _elegir_opcion(self, viewport, idx) -> bool:
+        """Clic en una opción del despliegue: como en el subrosco de antes."""
+        clave = self._despliegue
+        opciones = self._opciones_anillo(clave) if clave else []
+        if not 0 <= idx < len(opciones):
+            return False
+        tipo, valor, _texto, _icono, _actual = opciones[idx]
+        if tipo == "simetria":
+            return self._elegir_simetria(viewport, valor)
+        if tipo == "camara":
+            # Como en el subrosco de antes: se quita la rueda y empieza la orden.
+            self._despliegue = None
+            self._previa = None
+            _diana.cerrar_abanico()
+            self._antes_rueda = None
+            self.panel = None
+            QTimer.singleShot(0, lambda: self.diana._herramienta(
+                viewport, _diana.CAMARA_HERR[valor], _diana.NOMBRES[valor]))
+            self._sincronizar()
+            return True
+        if tipo == "seccion":
+            QTimer.singleShot(0, lambda: self._alternar_seccion(viewport, valor))
+            return True                      # siguen abiertas: puede tocar varias
+        if tipo == "limpia":
+            QTimer.singleShot(0, lambda: self._alternar_limpia(valor))
+            return True                      # 3.2.0: siguen abiertas, como las de la sección
+        if tipo == "accion":
+            if clave in UNIDOS:
+                self.modo[clave] = valor     # el botón repite la última
+            self._despliegue = None
+            self._previa = None
+            QTimer.singleShot(0, lambda: self._pulsar(viewport, valor))
+            self._sincronizar()
+            return True
+        g = {"chips": [], "finales": []}
+        g["finales" if tipo == "fin" else "chips"] = [(valor, _Todo())]
+        self.panel = clave
+        try:
+            self._accion_panel(viewport, g, QPointF())
+        finally:
+            if self.panel == clave:
+                self.panel = None
+        if tipo != "fin":
+            self._despliegue = None          # «al terminar»: sigue abierto para elegir la orden
+        self._sincronizar()
+        return True
+
+    # -- los huecos configurables (el gestor de barras ▸ Barra Rosco) --
     def bandas_de(self, T) -> tuple:
         """Las bandas configuradas con la geometría del tema ``T``: ``(grupo,
         claves, r_int, r_ext, a0, tam)``; las de abajo, del revés (como se
@@ -2799,9 +4177,7 @@ class Cadena:
 
     def _lados(self) -> tuple:
         """Los huecos de los lados con algo puesto (los de la barra)."""
-        if self._sin_arcos():
-            return ()
-        return tuple(x for x in self.lados_de(self.tema) if x[1])
+        return ()                            # Rosco: todo va en los dos anillos
 
     def _huecos_defecto(self) -> dict:
         """El reparto de siempre (el del tema)."""
@@ -2815,21 +4191,104 @@ class Cadena:
                 "aro": list(_diana.ARO_DEF),
                 "gajos": list(_diana.GAJOS_DEF), "tri": list(_diana.TRI_DEF),
                 "centro": list(_diana.CENTRO_DEF),
-                "ojos": {"arriba": "rueda", "derecha": "ayuda", "abajo": "ocultar_resto",
-                         "izquierda": "historial"}}
+                "ojos": ({"arriba": "rueda", "derecha": "historial", "abajo": "ocultar_resto",
+                          "izquierda": "texturas"} if _edicion.con("texturas") else
+                         {"arriba": "rueda", "derecha": "historial", "abajo": "ocultar_resto",
+                          "izquierda": _huecos.clave_ojo("ayuda")})}
 
-    def _huecos_cambiados(self) -> None:
-        """Tras cambiar lo que va en un hueco: se repinta todo."""
+    def _huecos_cambiados(self, soltar: bool = True) -> None:
+        """Tras cambiar lo que va en un hueco: se repinta todo. Con
+        ``soltar=False`` (cambio de grupo) la barra fija se queda donde está."""
+        self._aplicar_anillos()
         self._poner_rueda()
         _iconos.olvidar_externos()
         self._etiqueta_w = None
-        if self.panel in ("vistas", *PANELES_OJO):
+        if soltar:
+            if self.panel in ("vistas", *PANELES_OJO):
+                self.panel = None
+            self._rehacer_dibujo()
+        else:
             self.panel = None
-        self._rehacer_dibujo()
+            self._bajo = None
+            self._estado_pintado = None
+            self._olvidar_dibujo()
         self._sincronizar()
         enlace = getattr(self, "enlace", None)
         if enlace is not None:
             enlace.repintar()
+
+    def _juego_cambiado(self) -> None:
+        self._huecos_cambiados(soltar=False)
+
+    # -- la fila de puntos de los grupos --
+    def _fila_puntos(self, c):
+        """``(celdas, rectángulo del nombre, rectángulo total)`` con el anillo
+        centrado en ``c``, o None si no se dibuja. ``celdas``: lista de
+        ``(id, celda de clic, centro del punto)``, de derecha a izquierda:
+        General siempre es el primero de la derecha, junto al ojo rojo."""
+        juegos = self.huecos.juegos()
+        if len(juegos) < 2 or self._previsualizando or self._sin_arcos():
+            return None
+        r = self._r_ext() + CHICO_R + 3.0
+        y = self._centro_ojo(c, "abajo").y()
+        derecha = c.x() + r * math.cos(math.radians(CHICOS_F["notas"])) - CHICO_R - 3.0
+        celdas = []
+        en_orden = sorted(juegos, key=lambda juego: juego[0] != _huecos.ID_GENERAL)
+        for i, (id_juego, _nombre, _color) in enumerate(en_orden):
+            celda = QRectF(derecha - (i + 1) * PUNTO_PASO, y - PUNTO_ALTO / 2.0, PUNTO_PASO, PUNTO_ALTO)
+            celdas.append((id_juego, celda, celda.center()))
+        # El nombre, a la misma distancia del ojo que el punto de General.
+        borde_punto = celdas[0][2].x() + PUNTO_R
+        x_nombre = c.x() + (c.x() - borde_punto)
+        ancho = max(0.0, self._rect_nav(c).right() - x_nombre)
+        nombre = QRectF(x_nombre, y - PUNTO_ALTO / 2.0, ancho, PUNTO_ALTO)
+        total = celdas[0][1].united(celdas[-1][1]).united(nombre)
+        return celdas, nombre, total
+
+    def _punto_en(self, p):
+        """El id del grupo cuyo punto está bajo ``p``, o None (ojo: General es 0)."""
+        if self.ancla is None or p is None:
+            return None
+        fila = self._fila_puntos(self.ancla)
+        if fila is None:
+            return None
+        g = self._panel()
+        if g is not None and g["marco"].contains(p):
+            return None                      # un panel abierto tapa los puntos
+        return next((id_juego for id_juego, celda, _q in fila[0] if celda.contains(p)), None)
+
+    def _pintar_puntos(self, painter, c) -> None:
+        fila = self._fila_puntos(c)
+        if fila is None:
+            return
+        celdas, rect_nombre, _total = fila
+        activo = self.huecos.id_activo
+        colores = {id_juego: QColor(color) for id_juego, _nombre, color in self.huecos.juegos()}
+        con_paleta = self.tema.paleta is not None
+        def color_de(id_juego):
+            if not con_paleta:
+                return colores[id_juego]
+            return QColor(ROJO) if id_juego == activo else QColor(_flotante.GRIS)
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        for id_juego, _celda, q in celdas:
+            color = color_de(id_juego)
+            if id_juego == activo:
+                painter.setPen(QPen(color, PUNTO_CONTORNO))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(q, PUNTO_R_ACTIVO, PUNTO_R_ACTIVO)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(q, PUNTO_R, PUNTO_R)
+        f = QFont(painter.font())
+        f.setPixelSize(10)
+        f.setWeight(QFont.DemiBold)
+        painter.setFont(f)
+        painter.setPen(color_de(activo))
+        texto = QFontMetricsF(f).elidedText(self.huecos.nombre_visible(activo), Qt.ElideRight,
+                                            rect_nombre.width())
+        painter.drawText(rect_nombre, Qt.AlignLeft | Qt.AlignVCenter, texto)
+        painter.restore()
 
     def _poner_rueda(self) -> None:
         """Lo configurado dentro de la rueda y en su aro."""
@@ -2838,7 +4297,7 @@ class Cadena:
         _diana.poner_rueda(h.lista("gajos"), h.lista("tri"), h.lista("centro"))
 
     def _ojo_de(self, funcion):
-        """El ojo que lleva ``funcion`` («rueda», «historial», «ayuda»), o None."""
+        """El ojo que lleva ``funcion`` («rueda», «historial»), o None."""
         if not self.tema.rueda:
             return "arriba" if funcion == "rueda" else None
         return self.huecos.ojo_de(funcion)
@@ -2858,8 +4317,7 @@ class Cadena:
         botoncito, banda, aro de la rueda u ojo; si no, el centro."""
         if clave in self._chicos():
             return self._centro_chico(c, clave)
-        barrido = self.tema.barrido
-        for claves, r_int, r_ext, a0, _tam in self._bandas():
+        for claves, r_int, r_ext, a0, _tam, barrido in self._bandas():
             if clave in claves:
                 return centro_boton(c, r_int, r_ext, claves.index(clave), len(claves), a0, barrido)
         for _j, k, r_int, r_ext, a0, b, _tam in self._lados():
@@ -2881,6 +4339,110 @@ class Cadena:
             return
         gestor.ejecutar(clave[len(_huecos.EXTERNO):])
 
+    # -- la Ayuda rápida (el ojo de la ayuda, sin biblioteca de texturas) --
+    def _filas_ayuda_rapida(self) -> list:
+        """``[(botón, veces, html)]``: las filas principales de la ayuda de los
+        clics, ya sin lo de las partes que faltan, en su primera frase."""
+        if not _edicion.con("panel_ayuda"):
+            return []
+        from . import _panel_ayuda
+        filas = [f for _t, fs in _panel_ayuda.AYUDA_CLICS for f in fs]
+        salida = []
+        for inicio in AYUDA_RAPIDA:
+            fila = next((f for f in filas if f[2].startswith(inicio)), None)
+            if fila is not None:
+                salida.append((fila[0], fila[1], _primera_frase(_tr(fila[2]))))
+        return salida
+
+    def _panel_ayuda_rapida(self, c):
+        """El panel al lado de su ojo, como el del historial."""
+        if not self.tema.rueda or not _edicion.con("panel_ayuda"):
+            return None
+        from PySide6.QtGui import QTextDocument
+        from ._panel_ayuda import AYUDA_RATON
+        llave = (_idioma.actual(),)
+        if getattr(self, "_ayuda_rapida", (None,))[0] != llave:
+            f = QFont(QApplication.font())
+            f.setPointSizeF(8.5)
+            ancho = AYUDA_RAPIDA_W - 14.0 - AYUDA_RATON
+            docs = []
+            for boton, veces, html in self._filas_ayuda_rapida():
+                doc = QTextDocument()
+                doc.setDefaultFont(f)
+                doc.setDocumentMargin(0.0)
+                doc.setTextWidth(ancho)
+                doc.setHtml("<div style='color:#30302e'>" + html + "</div>")
+                docs.append((boton, veces, doc, max(doc.size().height(), 22.0)))
+            pie = _tr("Clic: ayuda completa (Opciones ▸ Ayuda)")
+            alto_pie = QFontMetricsF(f).boundingRect(QRectF(0.0, 0.0, AYUDA_RAPIDA_W - 16.0, 400.0),
+                                                     Qt.AlignLeft | Qt.TextWordWrap, pie).height()
+            self._ayuda_rapida = (llave, docs, pie, alto_pie)
+        _llave, docs, pie, alto_pie = self._ayuda_rapida
+        alto = 28.0 + sum(h + 5.0 for *_x, h in docs) + alto_pie + 12.0
+        cual = self._ojo_de("ayuda") or "izquierda"
+        q = self._centro_ojo(c, cual)
+        w = AYUDA_RAPIDA_W
+        if cual == "derecha":
+            x0, y0 = c.x() + self.tema.r_ext + 14.0, c.y() - alto / 2.0
+        elif cual == "arriba":
+            x0, y0 = q.x() - w / 2.0, q.y() - OJO_R - 12.0 - alto
+        elif cual == "abajo":
+            x0, y0 = q.x() - w / 2.0, q.y() + OJO_R + 12.0
+        else:
+            x0, y0 = c.x() - self.tema.r_ext - 14.0 - w, c.y() - alto / 2.0
+        filas, y = [], y0 + 28.0
+        for boton, veces, doc, h in docs:
+            filas.append((QRectF(x0 + 7.0, y, w - 14.0, h), boton, veces, doc))
+            y += h + 5.0
+        return {"marco": QRectF(x0, y0, w, alto), "chips": [],
+                "titulo": QRectF(x0 + 10.0, y0 + 5.0, w - 20.0, 18.0),
+                "filas": filas, "pie": (QRectF(x0 + 8.0, y + 2.0, w - 16.0, alto_pie + 4.0), pie)}
+
+    def _pintar_ayuda_rapida(self, painter, g, f) -> None:
+        if not _edicion.con("panel_ayuda"):
+            return
+        from ._panel_ayuda import AYUDA_RATON, _ratoncito
+        negrita = QFont(f)
+        negrita.setBold(True)
+        painter.setFont(negrita)
+        painter.setPen(TINTA)
+        painter.drawText(g["titulo"], Qt.AlignLeft | Qt.AlignVCenter, _tr("Ayuda rápida"))
+        painter.setFont(f)
+        for r, boton, veces, doc in g["filas"]:
+            _ratoncito(painter, r.left(), r.top(), boton, veces)
+            painter.save()
+            painter.translate(r.left() + AYUDA_RATON, r.top())
+            doc.drawContents(painter)
+            painter.restore()
+        caja, pie = g["pie"]
+        painter.setPen(QPen(QColor(220, 200, 200), 1.0))
+        painter.drawLine(QPointF(caja.left(), caja.top() - 3.0), QPointF(caja.right(), caja.top() - 3.0))
+        cursiva = QFont(f)
+        cursiva.setItalic(True)
+        painter.setFont(cursiva)
+        painter.setPen(QColor(110, 110, 104))
+        painter.drawText(caja, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, pie)
+        painter.setFont(f)
+
+    def _abrir_ayuda(self, viewport) -> None:
+        """Opciones ▸ Ayuda (el ojo de la ayuda)."""
+        from . import _panel_opciones
+        pagina = _panel_opciones.PanelOpciones.SECCIONES.index("Ayuda")
+        q = self._centro_clave(self.ancla, "ayuda") if self.ancla is not None else None
+        pos = viewport.mapToGlobal(QPoint(round(q.x()), round(q.y()))) if q is not None else QCursor.pos()
+        try:
+            _panel_opciones.abrir(self, pos, pagina=pagina)
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo abrir la ayuda")
+
+    def _abrir_texturas(self, viewport) -> None:
+        """El acceso directo del ojo verde: la ventana de la biblioteca de texturas."""
+        biblioteca = texturas(self.app.window)
+        if biblioteca is None or not callable(getattr(biblioteca, "mostrar", None)):
+            viewport.flash_status(_tr("La biblioteca de texturas no está instalada."), 5000)
+            return
+        biblioteca.mostrar()
+
     def _pulsar(self, viewport, clave) -> bool:
         """Lo que hace el botón ``clave`` esté donde esté (banda, botoncito,
         aro de la rueda u ojo)."""
@@ -2891,19 +4453,30 @@ class Cadena:
             QTimer.singleShot(0, lambda: self._ejecutar_externo(viewport, clave))
             self._sincronizar()
             return True
-        if clave == "flip":                  # la Simetría propia (no la de la barra de modificar), con su submenú
+        if clave == "ayuda" and _edicion.con("panel_ayuda"):   # el ojo de la ayuda: Opciones ▸ Ayuda
+            self.panel = None
+            self._sincronizar()
+            QTimer.singleShot(0, lambda: self._abrir_ayuda(viewport))
+            return True
+        if clave == "texturas" and _edicion.con("texturas"):
+            self.panel = None
+            QTimer.singleShot(0, lambda: self._abrir_texturas(viewport))
+            self._sincronizar()
+            return True
+        if clave == "flip":                  # la Simetría propia (no la del arco de modificar), con su submenú
             abierta = self.panel == "flip" and viewport.active_tool is getattr(self, "simetria", None)
             QTimer.singleShot(0, lambda: self._activar_simetria(viewport, not abierta))
             return True
-        if clave == "empujar":               # lo mismo que Desplazar ▸ empujar/tirar
-            QTimer.singleShot(0, lambda: self._accion_empujar(viewport))
+        if clave in ("empujar", "texto"):    # su última orden (subrosco: clic derecho)
+            self.panel = None
+            QTimer.singleShot(0, lambda: self._lanzar(viewport, clave))
             return True
         if clave in _seleccion.SEMI:
             QTimer.singleShot(0, lambda: self._accion_semi(viewport, clave))
             return True
-        if clave == "agrupar":               # Crear: abre su submenú
-            self.panel = None if self.panel == "agrupar" else "agrupar"
-            self._sincronizar()
+        if clave == "agrupar":               # Crear: su última acción
+            self.panel = None
+            QTimer.singleShot(0, lambda: self._lanzar(viewport, clave))
             return True
         if clave in ACCIONES_SEL:            # actúan ya sobre la selección
             self.panel = None
@@ -2918,6 +4491,22 @@ class Cadena:
         if clave == "cerrar_app":
             QTimer.singleShot(0, self._cerrar_ingetrazo)
             return True
+        if clave == "reiniciar":             # 1.9.0: desde Apagar
+            QTimer.singleShot(0, lambda: self.diana.usar(viewport, "reiniciar"))
+            return True
+        if clave == "apagar_rosco":
+            self._apagar_rosco()
+            return True
+        if clave == "explotar":              # 1.5.0: desde Invertir cara
+            self.panel = None
+            QTimer.singleShot(0, lambda: self._explotar(viewport))
+            self._sincronizar()
+            return True
+        if clave == "sel_rapida" and _edicion.con("sel_rapida"):   # 3.1.0: por tipo o por medida
+            self.panel = None
+            QTimer.singleShot(0, lambda: self._abrir_sel_rapida(viewport))
+            self._sincronizar()
+            return True
         if clave in ORDENES_CHICAS:
             QTimer.singleShot(0, lambda: self._accion_chico(viewport, clave))
             return True
@@ -2925,23 +4514,35 @@ class Cadena:
             QTimer.singleShot(0, lambda: self._usar_diana(viewport, clave))
             return True
         if clave in self.bases or clave in MODOS or clave == "pintar":
-            # Una herramienta de la barra de dibujo (también desde Seleccionar o la barra de modificar)
-            # y su submenú; Pintar es la nativa.
-            self.panel = clave if clave in MODOS else None
-            if clave == "pintar":
-                QTimer.singleShot(0, lambda: self._pintar(viewport, self.modo["pintar"]))
-            elif clave == "seleccionar" and viewport.active_tool is self._select_nativo():
-                # Ya se está seleccionando con el de IngeTrazo: basta con el
-                # submenú (cambiar de herramienta lo soltaría).
-                self.base = clave
-                viewport.flash_status(_tr(self._mensaje_base()), 6000)
-            else:
-                self.base = clave
-                QTimer.singleShot(0, lambda: self._activar_base(viewport))
+            # Una herramienta del anillo: su última orden, directa (2.49.0);
+            # el subrosco, con el clic derecho.
+            self.panel = None
+            QTimer.singleShot(0, lambda: self._lanzar(viewport, clave))
             self._sincronizar()
             return True
         viewport.flash_status(_tr("El botón «{0}» no hace nada aquí.", clave), 3000)
         return True
+
+    def _explotar(self, viewport) -> None:
+        """Explotar lo seleccionado (la orden de IngeTrazo)."""
+        win = self.app.window
+        if not viewport.scene.selection:
+            viewport.flash_status(_tr("Explotar: selecciona antes un grupo o componente."), 4000)
+            return
+        hecho = False
+        orden = getattr(win, "_on_explode_group", None)
+        try:
+            if callable(orden):
+                orden()
+                hecho = True
+            else:
+                hecho = _seleccion.disparar_menu(win, ("Explotar", "Explode"))
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo explotar")
+        if not hecho:
+            viewport.flash_status(_tr("No encontré la orden «{0}» de IngeTrazo.", "Explotar"), 4000)
+        viewport.update()
+        self._sincronizar()
 
     def _capa_bajo(self) -> float:
         """«Abajo»: del cursor al tope de la pastilla de la capa."""
@@ -2983,7 +4584,9 @@ class Cadena:
     def _submenu_centrado(self) -> bool:
         """El submenú de una herramienta (o de Escalar / Rotar) sale a la
         derecha del cursor (temas A y B): se esconde todo menos el ojo azul."""
-        return self.tema.submenu_centrado and (self.panel in MODOS or self.panel in CON_CAJETINES)
+        return (self.tema.submenu_centrado and not self._es_pegado()
+                and (self.panel in MODOS or self.panel in CON_CAJETINES
+                     or self.panel == "agrupar"))    # Crear, como los demás
 
     def _centrado_con_cajetines(self) -> bool:
         """Todos los submenús llevan encima el recuadro de lo seleccionado
@@ -2997,8 +4600,33 @@ class Cadena:
         return self._rueda_abierta() or self._submenu_centrado() or self._camara_abierta()
 
     def _camara_abierta(self) -> bool:
-        """El subrosco de la Cámara (en lugar de la rueda)."""
-        return self.tema.rueda and self.panel == "camara"
+        """El subrosco de la Cámara o el de la Sección (en lugar de la rueda)."""
+        return self.tema.rueda and self.panel in OPCIONES_RUEDA
+
+    def _accion_seccion(self, k):
+        """La QAction de IngeTrazo del interruptor ``k`` de la sección, o None."""
+        from PySide6.QtGui import QAction
+
+        def limpio(t):
+            return t.split("\t")[0].replace("&", "").strip().rstrip("…").strip().lower()
+        buscados = {limpio(t) for t in SECCION_MENU[k]}
+        for a in self.app.window.findChildren(QAction):
+            if limpio(a.text()) in buscados:
+                return a
+        return None
+
+    def _seccion_marcada(self, k) -> bool:
+        a = self._accion_seccion(k)
+        return bool(a is not None and a.isCheckable() and a.isChecked())
+
+    def _alternar_seccion(self, viewport, k) -> None:
+        a = self._accion_seccion(k)
+        if a is None or not a.isEnabled():
+            viewport.flash_status(_tr("No encontré la orden «{0}» de IngeTrazo.", SECCION_MENU[k][0]), 4000)
+            return
+        a.trigger()
+        viewport.update()
+        self._sincronizar()
 
     # -- los ojos (temas A y B): pasar por el de arriba abre la rueda --
     def _centro_ojo(self, c, cual: str | None = None) -> QPointF:
@@ -3229,7 +4857,7 @@ class Cadena:
                 if clave and clave not in chicos:
                     chicos[clave] = angulo
             return chicos
-        chicos = dict(CHICOS_BARRA_DIBUJO)
+        chicos = dict(CHICOS_ANILLO)
         if T.diana_plegada:
             chicos.update(CHICOS_DIANA)
         chicos.update(_seleccion.CHICOS)
@@ -3279,7 +4907,7 @@ class Cadena:
                 painter.setBrush(relieve_redondo(q, CHICO_R))
             elif transparente:
                 # En la ventanita, un relleno casi invisible para que reciba
-                # el clic; en el cursor nada (Windows lo pintaría negro).
+                # el clic; en el cursor nada (el sistema lo pintaría negro).
                 painter.setBrush(QBrush(QColor(255, 255, 255, 3)) if para_clic else Qt.NoBrush)
             else:
                 painter.setBrush(QBrush(QColor(255, 255, 255)))
@@ -3318,7 +4946,10 @@ class Cadena:
             elif clave == "texto":
                 self._activar_texto(viewport)
             elif clave == "limpia":
-                self._menu_limpia(viewport, self._bajo_chico(viewport, clave))
+                if self.ancla is not None and self.win is not None and self.win.isVisible():
+                    self._abrir_despliegue("limpia")   # 3.2.0: en el anillo, sin menú
+                else:
+                    self._menu_limpia(viewport, self._bajo_chico(viewport, clave))
             elif clave in CHICOS_DIANA:
                 self.diana.usar(viewport, clave)
             elif clave in ("chincheta", "limpia"):
@@ -3326,7 +4957,7 @@ class Cadena:
             elif clave == "preferencias":
                 self._menu_preferencias(viewport, self._bajo_chico(viewport, clave))
             elif clave == "apagar":
-                self._menu_apagar(viewport, self._bajo_chico(viewport, clave))
+                self._clic_apagar(viewport, clave)
             elif clave in _diana.FILA:
                 self._usar_diana(viewport, clave)
             elif clave == "nav":
@@ -3337,15 +4968,15 @@ class Cadena:
                 self._accion_chico_sel(viewport, clave)
         except Exception:  # noqa: BLE001
             log.exception("fallo en el botoncito %s", clave)
-            viewport.flash_status(_tr("Rosco LT: no se pudo {0}.", NOMBRES_CHICOS.get(clave, clave).lower()), 4000)
+            viewport.flash_status(_tr("Rosco: no se pudo {0}.", NOMBRES_CHICOS.get(clave, clave).lower()), 4000)
         self._sincronizar()
 
     def _abrir_tareas(self, viewport) -> None:
-        """Las Tareas (pieza ``_notas``), como su botón: la ventana
-        en la última pestaña usada (tareas del modelo o de IngeTrazo)."""
-        listas = getattr(self.app.window, "_rosco_lt_tareas", None)
+        """Las Tareas (pieza ``_notas``), como su botón: la ventana en la
+        última pestaña usada (tareas del modelo o de IngeTrazo)."""
+        listas = getattr(self.app.window, atributo("tareas"), None)
         if listas is None or not callable(getattr(listas, "ventana", None)):
-            viewport.flash_status(_tr("Las tareas no se pudieron cargar (mira el registro)."), 5000)
+            viewport.flash_status(_tr("Tareas: no se pudieron cargar (mira el registro)."), 5000)
             return
         listas.ventana().mostrar()
 
@@ -3464,6 +5095,22 @@ class Cadena:
             return
         calc.mostrar(self._junto_a_diana(viewport, calc.size()))
 
+    def _limpieza(self):
+        if self.limpieza is None:
+            from ._limpia import Limpieza
+            self.limpieza = Limpieza(self.app.window)
+        return self.limpieza
+
+    def _alternar_limpia(self, parte) -> None:
+        """Un interruptor de Pantalla limpia (en el anillo): las opciones
+        siguen abiertas para tocar varias."""
+        limpia = self._limpieza()
+        if parte == "todo":
+            limpia.todo(not limpia.todo_quitado())
+        else:
+            limpia.poner(parte, not limpia.esta_quitado(parte))
+        self._sincronizar()
+
     def _menu_limpia(self, viewport, pos) -> None:
         """Pantalla limpia por partes (``_limpia``): cada cosa se marca al
         quitarla; «Quitar todo» pasa a «Mostrar todo» con todo quitado."""
@@ -3513,7 +5160,7 @@ class Cadena:
 
     # -- el extracto de propiedades (barra de selección) --
     def _rect_props(self, c) -> QRectF:
-        """Encima de todo (donde en la barra de dibujo va el buscador); con el submenú al
+        """Encima de todo (donde en el anillo va el buscador); con el submenú al
         centro, encima del submenú y centrado con él."""
         if self._centrado_con_cajetines():
             g = self._panel(c)
@@ -3606,10 +5253,11 @@ class Cadena:
                  else self._centro_fila(self.ancla, "buscar"))
             self._abrir_menus(viewport, q)
             return
-        if parte == "camara":                # su subrosco, en lugar de la rueda
+        if parte == "camara":                # 3.1.0: sus órdenes, en los gajos de la rueda
             _diana.cerrar_abanico()
-            self.panel = "camara"
-            self._sincronizar()
+            # 3.1.1: ya salen al pasar; el clic las deja a la vista (se quitan al irse).
+            self._desp_quitado = None
+            self._abrir_despliegue("camara")
             return
         if parte == "seccion":
             # Al poner el plano, pasa a Desplazarlo (``_vigilar_seccion``).
@@ -3722,7 +5370,7 @@ class Cadena:
             self.menus_arbol.abrir(pos)
         except Exception:  # noqa: BLE001
             log.exception("no se pudo abrir el árbol de menús")
-            viewport.flash_status(_tr("Rosco LT: no se pudo abrir el árbol de menús."), 4000)
+            viewport.flash_status(_tr("Rosco: no se pudo abrir el árbol de menús."), 4000)
 
     def _encuadre(self, viewport) -> None:
         tool = viewport.active_tool
@@ -3775,8 +5423,8 @@ class Cadena:
 
     def _semi_activa(self, viewport):
         """El botón del arco de dentro (Desplazar, Escalar, Simetría, Rotar)
-        de la herramienta activa, o None (Alinear es de la barra de modificar)."""
-        barra = self._barra_modificar()
+        de la herramienta activa, o None (Alinear es del arco de modificar)."""
+        barra = self._arco_modificar()
         if barra is None:
             return None
         try:
@@ -3788,16 +5436,16 @@ class Cadena:
 
     def _estado_semi(self, viewport):
         """Lo que cambia el dibujo del arco de dentro (botón activo y modos)."""
-        barra = self._barra_modificar()
+        barra = self._arco_modificar()
         if barra is None:
             return None
         return (self._semi_activa(viewport), tuple(sorted(barra.modo.items())))
 
     def _accion_semi(self, viewport, clave) -> None:
-        """Un botón del arco de dentro: la herramienta de la barra de modificar (con su
+        """Un botón del arco de dentro: la herramienta del arco de modificar (con su
         modo); si ya era la activa, vuelve a Seleccionar. Desplazar, Escalar
         y Rotar dejan abierto su submenú."""
-        barra = self._barra_modificar()
+        barra = self._arco_modificar()
         if barra is None:
             viewport.flash_status(_tr("La barra de modificar no está disponible."), 4000)
             return
@@ -3811,9 +5459,10 @@ class Cadena:
         try:
             barra.activar(clave, cambiar=desde_empujar)
         except Exception:  # noqa: BLE001
-            log.exception("La barra de modificar no pudo activar %s", clave)
-        from ._arco import MODOS as MODOS_SEMI
-        self.panel = clave if clave != antes and clave in MODOS_SEMI else None
+            log.exception("El arco de modificar no pudo activar %s", clave)
+        self.panel = None                    # el subrosco, con el clic derecho (2.49.0)
+        if clave != antes and clave != "flip" and self._semi_activa(viewport) == clave:
+            self._esconder_para_orden(viewport)
         if clave == "flip" and antes != "flip":
             # Simetría no tiene submenú: se esconde todo hasta que termine.
             self.escondida = True
@@ -3823,7 +5472,7 @@ class Cadena:
     def _accion_empujar(self, viewport) -> None:
         """El botón de Empujar/Tirar: con su submenú (el de Desplazar), hasta el
         primer punto; pulsarlo otra vez vuelve a Seleccionar."""
-        barra = self._barra_modificar()
+        barra = self._arco_modificar()
         if barra is None:
             viewport.flash_status(_tr("La barra de modificar no está disponible."), 4000)
             return
@@ -3832,14 +5481,40 @@ class Cadena:
             barra._seleccionar()
             self._sincronizar()
             return
-        barra.modo["move"] = "empujar/tirar"
+        barra.modo["move"] = "empujar/tirar"     # modo interno: ya no está en el subrosco
         barra._activar_empujar()
-        self.panel = "move"
+        # Por su cuenta, sin el subrosco de Desplazar: la barra se esconde
+        # hasta que acabe la orden.
+        self.panel = None
+        if not self.anclada:
+            self.escondida = True
+            self._tool_escondida = viewport.active_tool
+        self._mostrar_multiempuje(viewport)
         self._sincronizar()
+
+    def _mostrar_multiempuje(self, viewport) -> None:
+        """La pestaña de Multiempuje en el panel lateral."""
+        mostrar = getattr(getattr(self.app.window, "_multiempuje", None), "mostrar_panel", None)
+        if not callable(mostrar):
+            return
+        try:
+            mostrar()
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo abrir la pestaña de Multiempuje")
+        viewport.setFocus()                  # lo tecleado (medidas) va al visor
+
+    @staticmethod
+    def _dibujar_anotaciones(viewport, painter) -> None:
+        try:
+            _anotar.pintar_guardadas(viewport, painter)
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudieron pintar las anotaciones")
 
     def _dibujar_piezas(self, viewport, painter) -> None:
         """Overlay de la Simetría y el Texto propios, solo con su orden activa."""
-        for pieza in (getattr(self, "simetria", None), getattr(self, "texto", None)):
+        for pieza in (getattr(self, "simetria", None), getattr(self, "texto", None),
+                      self.por_modo.get(("linea", "contorno 3D")),
+                      self.por_modo.get(("linea", "anotar"))):
             if pieza is not None and viewport.active_tool is pieza:
                 pieza.dibujar(viewport, painter)
 
@@ -3860,19 +5535,21 @@ class Cadena:
 
     def _modo_sel(self, viewport) -> bool:
         """El anillo en modo selección: Seleccionar (el de IngeTrazo o el de
-        la barra de dibujo) con algo seleccionado, o una herramienta de la barra de modificar (con o
-        sin selección) esperando su primer punto; salvo que la barra de modificar esté
+        el anillo) con algo seleccionado, o una herramienta del arco de modificar (con o
+        sin selección) esperando su primer punto; salvo que el arco de modificar esté
         abierto suelto."""
         tool = viewport.active_tool
         if tool is None:
             return False
+        if tool is self.espera and viewport.scene.selection:
+            return True                      # el rosco llamado con algo seleccionado: su información arriba
         seleccionar = tool is self.bases["seleccionar"] or tool is self._select_nativo()
         semi = not seleccionar and self._semi_activa(viewport) is not None
         if not (seleccionar or semi):
             return False
         if self._lazo is not None or (seleccionar and not viewport.scene.selection):
             return False
-        barra = self._barra_modificar()
+        barra = self._arco_modificar()
         if semi:
             from ._arco import _ocupada
             if _ocupada(tool) or getattr(barra, "_forzada", False) or getattr(barra, "anclada", False):
@@ -3887,9 +5564,9 @@ class Cadena:
         if self.dormida:                     # tras una orden, hasta que se la llame
             return False
         if self.anclada:
-            # Anclada: siempre a la vista, salvo mientras la barra de modificar (suelto)
+            # Anclada: siempre a la vista, salvo mientras el arco de modificar (suelto)
             # está abierto (sale donde se pulsó su botón, encima de esta).
-            barra = self._barra_modificar()
+            barra = self._arco_modificar()
             return not (barra is not None and not getattr(barra, "anclada", False)
                         and barra._en_juego(viewport))
         if (getattr(viewport, "nav_mode", None) is not None
@@ -3942,7 +5619,7 @@ class Cadena:
         except Exception:  # noqa: BLE001 — la ventanita nunca rompe la barra
             log.exception("fallo en la ventanita de medidas")
         try:                                 # Desplazar · copia: copias seguidas hasta Esc
-            barra = self._barra_modificar()
+            barra = self._arco_modificar()
             if barra is not None:
                 barra.vigilar_copias(vp)
         except Exception:  # noqa: BLE001
@@ -3952,10 +5629,10 @@ class Cadena:
             self._tras_encuadre = None       # el usuario salió del encuadre a mano
         sel = self._modo_sel(vp)
         if sel and self._semi_activa(vp) is not None:
-            # Lo que hace la barra de modificar al repasar: en modo copia, la copia de la
+            # Lo que hace el arco de modificar al repasar: en modo copia, la copia de la
             # nativa vuelve a quedar armada tras cada operación.
             try:
-                self._barra_modificar()._rearmar_copia(vp)
+                self._arco_modificar()._rearmar_copia(vp)
             except Exception:  # noqa: BLE001
                 log.exception("no se pudo rearmar la copia")
         # Dibujar ↔ selección: el anillo es el mismo, así que sigue donde
@@ -3992,6 +5669,11 @@ class Cadena:
         # orden hecha (con el tope del historial no crece: se mira también
         # cuál es el último paso).
         pila = getattr(vp.history, "undo_stack", None)
+        try:
+            if self.pasos is not None:
+                self.pasos.anotar(vp, lambda: self._nombre_paso(vp))   # para la lista de pasos
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo anotar el paso")
         vista = (len(pila), id(pila[-1]) if pila else None) if pila is not None else None
         if (vista is not None and self._pila_vista is not None
                 and (vista[0] > self._pila_vista[0]
@@ -3999,14 +5681,21 @@ class Cadena:
                 and self._de_la_barra(vp)):
             self._orden_hecha(vp)
         self._pila_vista = vista
+        # Seleccionar con el clic izquierdo nunca saca el rosco ni el anillo de
+        # selección (2.48.2): dormida sigue dormida y, a la vista, se esconde
+        # (la orden de Seleccionar sigue, con su ventana, lazo o múltiple).
+        if tool is not self.bases["seleccionar"]:
+            self.sel_extra = None
+        ids = self._ids_sel(vp)
         if self.dormida:
-            # Dormida: una selección nueva (Seleccionar) la despierta; con una
-            # orden que sigue, no (Desplazar coge lo que pinchas).
-            ids = self._ids_sel(vp)
-            if ids != self._sel_dormida:
-                self._sel_dormida = ids
-                if ids and not self._seguir_orden(vp):
-                    self.dormida = False
+            self._sel_dormida = ids
+        elif (ids != self._sel_vista and ids and not self.anclada
+              and (tool is self.bases["seleccionar"] or tool is self._select_nativo())):
+            self.dormida = True
+            self.panel = None
+            self._sel_dormida = ids
+            self._soltar()
+        self._sel_vista = ids
         ident = self.herramienta if tool is self.push else tool
         if ident is not self._tool_orden0:   # otra orden: «un paso atrás» empieza de cero
             self._tool_orden0 = ident
@@ -4035,6 +5724,7 @@ class Cadena:
         if not ver:
             if self.win.isVisible():
                 self.win.hide()
+            self._ocultar_previa()
             self._quitar_cursor(vp)
             if not en_juego:
                 self._soltar()
@@ -4042,10 +5732,14 @@ class Cadena:
         if self.fijo and not self.anclada and not self._raton_en_zona(vp):
             # El ratón se ha ido a los menús, las barras o la barra de estado:
             # la barra fija no se queda fuera del visor (anclada, sí).
+            volver = self._submenu_al_salir(vp)
             self._soltar()
+            self._submenu_fuera = volver
             if self.win.isVisible():
                 self.win.hide()
             return
+        if not self.fijo and self._submenu_fuera is not None:
+            self._reponer_submenu(vp)
         if self.fijo and self.ancla is not None:
             self._quitar_cursor(vp)
             self._cursor_sobre_barra(vp)
@@ -4058,39 +5752,10 @@ class Cadena:
             elif estado != self._estado_pintado:
                 self.win.update()
             self._estado_pintado = estado
-            self._anima_vigilar()
         else:
             if self.win.isVisible():
                 self.win.hide()
             self._poner_cursor(vp)
-        self._traza_rotar(vp)
-
-    def _traza_rotar(self, vp) -> None:
-        """TEMPORAL (2.39.0): si el rosco aparece con Rotar como herramienta,
-        se anota el estado en %APPDATA%/IngeTrazo/rosco_lt_rotar.log, para ver por
-        qué sale al volver al visor con el giro en marcha."""
-        try:
-            tool = vp.active_tool
-            visible = bool(self.win.isVisible() or self._cursor_puesto)
-            antes, self._traza_visible = getattr(self, "_traza_visible", False), visible
-            if not visible or antes or type(tool).__name__ != "RotateTool":
-                return
-            import os
-            import traceback
-            from ._arco import _ocupada
-            local = vp.mapFromGlobal(QCursor.pos())
-            linea = (f"{time.strftime('%H:%M:%S')} start={getattr(tool, 'start_point', None) is not None} "
-                     f"ocupada={_ocupada(tool)} marcha={self._en_marcha(vp)} modo_sel={self._modo_sel(vp)} "
-                     f"dormida={self.dormida} escondida={self.escondida} panel={self.panel} fijo={self.fijo} "
-                     f"anclada={self.anclada} win={self.win.isVisible()} cursor={self._cursor_puesto} "
-                     f"sel={len(vp.scene.selection)} raton=({local.x()},{local.y()}) "
-                     f"en_visor={vp.rect().contains(local)} activa={type(QApplication.activeWindow()).__name__}\n")
-            pila = "".join(traceback.format_stack(limit=9)[:-1])
-            ruta = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "IngeTrazo", "rosco_lt_rotar.log")
-            with open(ruta, "a", encoding="utf-8") as f:
-                f.write(linea + pila + "\n")
-        except Exception:  # noqa: BLE001 — la traza nunca molesta
-            pass
 
     # -- la línea de órdenes --
     def _texto_linea(self, vp) -> tuple | None:
@@ -4132,7 +5797,7 @@ class Cadena:
             clave, modo = tool.clave, self.modo.get(tool.clave)
         else:
             boton = self._semi_activa(vp)
-            barra = self._barra_modificar()
+            barra = self._arco_modificar()
             if boton is not None and barra is not None:
                 clave, modo = boton, barra.modo.get(boton)
                 if clave == "move" and modo == "copia" and getattr(barra, "_multicopia", None) and n:
@@ -4141,6 +5806,8 @@ class Cadena:
                 clave, modo = "pintar", self.modo.get("pintar")
         if clave is not None:
             nombre = NOMBRES.get(clave, clave).split(":")[0]
+            if _subsub.tiene(clave, modo):
+                modo = _subsub.cara(clave, modo)      # la orden del hueco con sub-submenú
             paso = _linea.paso(clave, modo, n, nombre)
             if paso is not None:
                 return paso
@@ -4191,7 +5858,7 @@ class Cadena:
 
     def _cursor_sobre_barra(self, vp) -> None:
         """Sobre los botones, el mismo cursor que en el visor (el lápiz o el de
-        la orden), no la flecha de Windows."""
+        la orden), no la flecha del sistema."""
         cursor = vp.cursor()
         mapa = cursor.pixmap()
         clave = (int(cursor.shape().value), 0 if mapa.isNull() else mapa.cacheKey())
@@ -4224,11 +5891,11 @@ class Cadena:
         forma = None if self._es_sel else self._forma_lapiz(viewport)
         clave = (T.clave, self.escala, self._es_sel, self.diana.proyeccion_actual(),
                  getattr(tool, "icon", None), self.base, self._pintando(viewport), forma,
-                 self._barra_modificar() is None, round(viewport.devicePixelRatioF(), 2),
+                 self._arco_modificar() is None, round(viewport.devicePixelRatioF(), 2),
                  self._estado_semi(viewport))
         if self._cursor is None or clave != self._cursor_clave:
             if T.cursor_ligero:
-                # Solo el anillo: cabe en el cursor por hardware de Windows.
+                # Solo el anillo: cabe en el cursor por hardware del sistema.
                 arriba = abajo = medio = T.r_ext + 6.0
                 dibujar = lambda p, c: self._pintar_banda(p, c, completo=False)  # noqa: E731
             else:
@@ -4239,7 +5906,7 @@ class Cadena:
                 else:
                     arriba = self._diana_dy() + self._e() * _diana.ARRIBA + 6.0
                     medio = max(self._medio_arcos(), self._e() * _diana.MEDIO) + 6.0
-            # En la barra de dibujo el puntero del centro es el lápiz de la herramienta.
+            # En el anillo el puntero del centro es el lápiz de la herramienta.
             puntero = None if forma is None else self._lapiz(viewport, forma)
             self._cursor = cursor_compuesto(viewport, tool, dibujar, medio, arriba, abajo,
                                             puntero=puntero)
@@ -4247,10 +5914,10 @@ class Cadena:
         viewport.setCursor(self._cursor)
         self._cursor_puesto = True
 
-    # -- el cursor lápiz de la barra de dibujo --
+    # -- el cursor lápiz del anillo --
     def _forma_lapiz(self, viewport):
-        """La forma junto al lápiz para la herramienta activa de la barra de dibujo, o
-        None si la activa no es de la barra de dibujo."""
+        """La forma junto al lápiz para la herramienta activa del anillo, o
+        None si la activa no es del anillo."""
         tool = viewport.active_tool
         if tool is self.push:
             return "altura"
@@ -4258,6 +5925,9 @@ class Cadena:
             return None
         if tool is self.espera:
             return ""
+        if tool is self.bases["seleccionar"]:
+            # Selección normal que suma o quita («+ −»), o con lazo.
+            return "lazo" if self.modo.get("seleccionar") == "lazo" else "sel_mas"
         return FORMA_LAPIZ.get(self.base, "")
 
     @staticmethod
@@ -4266,12 +5936,12 @@ class Cadena:
         return cursor(forma, max(1.0, float(viewport.devicePixelRatioF())))
 
     def _instalar_lapiz(self, viewport) -> None:
-        """El cursor de las herramientas de la barra de dibujo es el lápiz: el visor pone
+        """El cursor de las herramientas del anillo es el lápiz: el visor pone
         el cursor de la herramienta con ``_apply_tool_cursor`` (cambio de
-        herramienta, Ctrl, al confirmar…); se envuelve para que en la barra de dibujo sea
+        herramienta, Ctrl, al confirmar…); se envuelve para que en el anillo sea
         el lápiz (y, si la barra es el cursor, la barra)."""
         original = getattr(viewport, "_apply_tool_cursor", None)    # interno de 0.5.8
-        if not callable(original) or getattr(viewport, "_rosco_lt_lapiz", False):
+        if not callable(original) or getattr(viewport, atributo("lapiz"), False):
             return
 
         def aplicar(*args, **kwargs):
@@ -4280,6 +5950,12 @@ class Cadena:
             try:
                 if self._cursor_puesto and self._cursor is not None:
                     viewport.setCursor(self._cursor)
+                    return None
+                if self._empujando_nativo(viewport):
+                    from ._lapiz import cursor_empuje
+                    viewport.setCursor(cursor_empuje(getattr(self, "_angulo_empuje", 0.0),
+                                                     max(1.0, float(viewport.devicePixelRatioF())),
+                                                     getattr(self, "_ejes_empuje", None)))
                     return None
                 forma = self._forma_lapiz(viewport)
                 if forma is not None:
@@ -4290,7 +5966,97 @@ class Cadena:
             return original(*args, **kwargs)
 
         viewport._apply_tool_cursor = aplicar
-        viewport._rosco_lt_lapiz = True
+        setattr(viewport, atributo("lapiz"), True)
+
+    def _empujando_nativo(self, viewport) -> bool:
+        """Está activo el Empujar/tirar de IngeTrazo (el del rosco o el suyo)."""
+        tools = getattr(self.app.window, "_tools", None) or {}
+        tool = tools.get("pushpull")
+        return tool is not None and viewport.active_tool is tool
+
+    def _orientar_empuje(self, viewport, p) -> None:
+        """Con Empujar y el ratón quieto en una cara: el cursor apunta hacia
+        donde sale la cara (su normal vista en pantalla)."""
+        if self._cursor_puesto or not self._empujando_nativo(viewport):
+            return
+        if getattr(viewport.active_tool, "start_point", None) is not None:
+            return                           # empujando: se queda la dirección del principio
+        forma = self._angulo_cara(viewport, p, con_ejes=True)
+        if forma is None:
+            return
+        angulo, ejes = forma
+        anterior = getattr(self, "_angulo_empuje", None)
+        ejes_antes = getattr(self, "_ejes_empuje", None)
+        self._angulo_empuje, self._ejes_empuje = angulo, ejes
+        if (anterior is None or ejes != ejes_antes
+                or abs(((angulo - anterior) + 180.0) % 360.0 - 180.0) >= 5.0):
+            from ._lapiz import cursor_empuje
+            viewport.setCursor(cursor_empuje(angulo, max(1.0, float(viewport.devicePixelRatioF())), ejes))
+
+    @staticmethod
+    def _angulo_cara(viewport, p, con_ejes: bool = False):
+        """Grados (0 = arriba, sentido horario) de la normal de la cara bajo
+        ``p`` vista en pantalla, o None. ``con_ejes``: ``(grados, ejes)``,
+        con los dos lados de la cara vistos en pantalla (px, ya a la escala
+        de la caja del cursor), para dibujarla paralela a la cara."""
+        from ._flotante import a_pantalla
+        try:
+            cara, sitio = viewport.pick_face_placement(p.x(), p.y())
+        except Exception:  # noqa: BLE001
+            return None
+        if cara is None:
+            return None
+        try:
+            n = cara.normal() if callable(getattr(cara, "normal", None)) else cara.normal
+            c = cara.centroid() if callable(getattr(cara, "centroid", None)) else cara.centroid
+            n, c = QVector3D(n), QVector3D(c)
+            if sitio is not None:
+                from core.group import iter_placements
+                m = None
+                for g, mat in iter_placements(sitio):
+                    if g is sitio:
+                        m = mat
+                        break
+                if m is None:
+                    m = sitio.xform
+                if m is not None:                # un grupo sin mover no lleva matriz (1.11.2)
+                    c = m.map(c)
+                    n = m.mapVector(n)
+            if n.lengthSquared() < 1e-12:
+                return None
+            n = n.normalized()
+            o, d = viewport._pixel_to_ray(p.x(), p.y())
+            ojo = viewport.camera.eye()
+            # Se mira la cara de frente: si el ojo está detrás, la normal va al revés.
+            if QVector3D.dotProduct(ojo - c, n) < 0:
+                n = -n
+            largo = max(1e-3, (ojo - c).length() * 0.05)
+            a, b = a_pantalla(viewport, c), a_pantalla(viewport, c + n * largo)
+        except Exception:  # noqa: BLE001
+            return None
+        if a is None or b is None:
+            return None
+        dx, dy = b.x() - a.x(), b.y() - a.y()
+        if math.hypot(dx, dy) < 2.0:
+            return None                      # de frente: no se gira
+        grados = math.degrees(math.atan2(dx, -dy)) % 360.0
+        if not con_ejes:
+            return grados
+        ejes = None
+        try:
+            ref = QVector3D(0, 0, 1) if abs(n.z()) < 0.9 else QVector3D(1, 0, 0)
+            u = QVector3D.crossProduct(ref, n).normalized()
+            v = QVector3D.crossProduct(n, u).normalized()
+            pu, pv = a_pantalla(viewport, c + u * largo), a_pantalla(viewport, c + v * largo)
+            if pu is not None and pv is not None:
+                ux, uy, vx, vy = pu.x() - a.x(), pu.y() - a.y(), pv.x() - a.x(), pv.y() - a.y()
+                mayor = max(abs(ux + vx), abs(uy + vy), abs(ux - vx), abs(uy - vy))
+                if mayor > 1e-6:
+                    k = 9.0 / mayor           # la caja, del tamaño de siempre
+                    ejes = ((round(ux * k), round(uy * k)), (round(vx * k), round(vy * k)))
+        except Exception:  # noqa: BLE001
+            ejes = None
+        return grados, ejes
 
     def _quitar_cursor(self, viewport) -> None:
         if self._cursor_puesto:
@@ -4318,12 +6084,39 @@ class Cadena:
         """Vuelve al modo cursor (la barra acompaña al ratón). Anclada se
         queda donde está: solo se cierra el submenú."""
         self.panel = None
+        self._pegado = None
+        self._despliegue = None
+        self._submenu_fuera = None
         self._bajo = None
         self._estado_pintado = None
         if self.anclada:
             return
         self.fijo = False
         self.ancla = None
+
+    def _submenu_al_salir(self, vp):
+        """El subrosco abierto de una orden elegida y sin empezar, para que
+        vuelva cuando el ratón regrese de los paneles."""
+        if self._submenu_centrado() and self._cancelable(vp) and not self._en_marcha(vp):
+            return self.panel, vp.active_tool
+        return None
+
+    def _reponer_submenu(self, vp) -> None:
+        """De vuelta en el visor: el subrosco bajo el cursor, no el anillo."""
+        aqui = self._cursor_en_visor()
+        if aqui is None:
+            return
+        (clave, tool), self._submenu_fuera = self._submenu_fuera, None
+        if vp.active_tool is not tool or self._en_marcha(vp):
+            return
+        self._reposo.stop()
+        self.cursor_px = QPointF(aqui)
+        self.fijo = True
+        self.ancla = QPointF(aqui)
+        self.panel = clave                   # con el ratón en el ancla: sale centrado
+        self._bajo = None
+        self._estado_pintado = None
+        QTimer.singleShot(0, self._sincronizar)   # la línea de órdenes, en su sitio
 
     # -- la chincheta --
     def _y_chincheta(self, c) -> float:
@@ -4380,20 +6173,20 @@ class Cadena:
         if clave == "cerrar":
             self.anclada = False
             self._soltar()
-            self.cerrar_barra_dibujo()
+            self.cerrar_anillo()
             if viewport.scene.selection:
                 # La barra de selección: cerrarla es dejar de seleccionar.
                 limpiar = getattr(viewport.scene, "clear_selection", None)
                 if callable(limpiar):
                     limpiar()
                     viewport.update()
-            viewport.flash_status(_tr("Rosco LT: barra cerrada."), 2500)
+            viewport.flash_status(_tr("Rosco: barra cerrada."), 2500)
             self._sincronizar()
             return
         self.anclada = not self.anclada
         viewport.flash_status(
-            _tr("Rosco LT: barra anclada aquí (la chincheta la suelta; ✕ la cierra)."
-            if self.anclada else "Rosco LT: barra suelta: vuelve a seguir al ratón."), 4000)
+            _tr("Rosco: barra anclada aquí (la chincheta la suelta; ✕ la cierra)."
+            if self.anclada else "Rosco: barra suelta: vuelve a seguir al ratón."), 4000)
         self._sincronizar()
 
     def _mascara_path(self, c) -> QPainterPath:
@@ -4411,8 +6204,8 @@ class Cadena:
             path.addEllipse(self._centro_ojo(c), r + 2.0, r * 0.75 + 2.0)
             path.addRect(self._rect_props(c))
         else:
-            path.addPath(sector(c, T.r1[0], T.r2[1], T.a_arriba, T.barrido))
-            path.addPath(sector(c, T.r1[0], T.r2[1], T.a_abajo, T.barrido))
+            path.addEllipse(c, T.r2[1] + 2.0, T.r2[1] + 2.0)       # los dos anillos
+            path.addEllipse(c, T.r1[0] - 1.0, T.r1[0] - 1.0)       # (el hueco del centro, fuera)
             for _j, _k, r_int, r_ext, a0, b, _tam in self._lados():
                 path.addPath(sector(c, r_int, r_ext, a0, b))
             if T.rueda:
@@ -4432,6 +6225,11 @@ class Cadena:
             path.addRect(self._rect_capa(c))
             if not T.cajetines_plegados:
                 path.addRect(self._rect_nav(c))
+            fila = self._fila_puntos(c)
+            if fila is not None:
+                for _id, celda, _q in fila[0]:
+                    path.addRect(celda)
+                path.addRect(fila[1])
             for clave in self._chicos():
                 path.addEllipse(self._centro_chico(c, clave), CHICO_R + 1.0, CHICO_R + 1.0)
             if not T.rueda:
@@ -4441,25 +6239,45 @@ class Cadena:
             if self._con_props():
                 path.addRect(self._rect_props(c))
         g = self._panel(c)
+        pegado = g is not None and g.get("pegado")
         if g is not None:
-            path.addRect(g["marco"])
+            if not pegado:
+                path.addRect(g["marco"])
+            for _o, forma in self._fly_formas(g):          # el sub-submenú abierto
+                if hasattr(forma, "path"):
+                    path.addPath(forma.path)
+                else:
+                    path.addRect(forma)
         # Sitio para la etiqueta más ancha, siempre: así la máscara no cambia
         # (ni se recalcula) cada vez que el ratón pasa a otro botón.
         alto = rect_etiqueta(self.win.font(), "", self._pos_etiqueta(c))
         ancho = self._ancho_etiqueta()
         path.addRect(QRectF(c.x() - ancho / 2.0, alto.top(), ancho, alto.height()))
+        rotulos = self._rotulos_despliegue(c)
+        if rotulos:
+            extra = QPainterPath()
+            for caja, *_r in rotulos:
+                extra.addRect(caja.adjusted(-2.0, -2.0, 2.0, 2.0))
+            path = path.united(extra)
+        if pegado:
+            # El subrosco pegado al botón va encima del anillo: sumado (si se
+            # añadiera sin más, lo que se solapa quedaría fuera, como un agujero).
+            caja = QPainterPath()
+            caja.addRect(g["marco"])
+            path = path.united(caja)
         return path
 
     def _fijar_mascara(self) -> None:
         self.win.fijar_mascara(self._mascara_path(self.ancla),
                                clave=(self.tema.clave, self.escala, self._es_sel, self.pos_capa,
-                                      self.panel, len(self.historial), self._sitio_submenu()))
+                                      self.panel, len(self.historial), self._sitio_submenu(),
+                                      self._fly, self._despliegue))
 
     def _ancho_etiqueta(self) -> float:
         if self._etiqueta_w is None:
             textos = [*NOMBRES.values(), *NOMBRES_CHICOS.values(),
                       "Navegador: grupos y componentes del modelo",
-                      "Pasar la selección a otra capa", "Capa donde va lo que dibujas",
+                      *(t for v in TEXTOS_CAPA.values() for t in ((v,) if isinstance(v, str) else v)),
                       *(texto_chincheta(k, b) for k in ("chincheta", "cerrar", "limpia")
                         for b in (False, True)),
                       *(_tr("{0} (falta la barra de modificar)", _tr(NOMBRES[k].split(':')[0]))
@@ -4469,6 +6287,10 @@ class Cadena:
             f = self.win.font()
             self._etiqueta_w = max(rect_etiqueta(f, t, QPointF(0.0, 0.0)).width()
                                    for t in textos)
+            # Los nombres de los grupos no se traducen.
+            self._etiqueta_w = max(self._etiqueta_w, *(
+                rect_etiqueta(f, nombre, QPointF(0.0, 0.0), traducir=False).width()
+                for _id, nombre, _color in self.huecos.juegos()))
         return self._etiqueta_w
 
     def _arriba_todo(self) -> float:
@@ -4540,7 +6362,7 @@ class Cadena:
 
     def tragar_clic(self) -> None:
         """Un desplegable de la barra se acaba de cerrar: el clic que lo
-        cerró (Windows lo entrega también al visor) se descarta."""
+        cerró (el sistema lo entrega también al visor) se descarta."""
         self._tragar_hasta = time.monotonic() + 0.4
 
     def _abrir_navegador(self, viewport) -> None:
@@ -4559,26 +6381,101 @@ class Cadena:
             self.navegador.abrir(viewport, QPoint(pos.x() - ANCHO, pos.y()))
         except Exception:  # noqa: BLE001
             log.exception("no se pudo abrir el navegador")
-            viewport.flash_status(_tr("Rosco LT: no se pudo abrir el Navegador."), 4000)
-
-    def _texto_capa(self) -> str:
-        if self._es_sel:
-            nombre = self._datos_sel()[1] or _tr("varias")
-        else:
-            nombre = self.capas.actual(self.app.viewport.scene)
-        return _tr("Capa: {0}", _tr(nombre))
+            viewport.flash_status(_tr("Rosco: no se pudo abrir el Navegador."), 4000)
 
     def _pintar_capa(self, painter, c, encima: bool) -> None:
+        """El cajetín: ① aplicar capa, ② color, ③ la capa ACTIVA, ④ hacer
+        activa la de lo seleccionado, ⑤ aislar, ⑥ bloquear, ⑦ ▾. Se dibuja a
+        180 px de ancho y se escala al tamaño de la barra."""
+        from ._capas import pintar_aplicar
+        botones = _edicion.con("capas_panel")          # ④ ⑤ ⑥
+        if botones:
+            from ._capas_panel import pintar_candado, pintar_diana, pintar_gotero
         r = self._rect_capa(c)
-        self._pastilla(painter, r, self._texto_capa(), encima, "capas")
-        if self.aplicar_capa:
-            # Aplicar capa en marcha: un punto rojo sobre el icono.
-            painter.save()
+        act, rgb, hay_sel, sel, ais, bloq, aplicar = self._estado_capa()
+        k = r.width() / CAPA_REF_W
+        painter.save()
+        try:
             painter.setRenderHint(QPainter.Antialiasing)
-            painter.setPen(QPen(BLANCO, 1.0))
-            painter.setBrush(QBrush(ROJO))
-            painter.drawEllipse(QPointF(r.left() + 23.0, r.top() + 5.0), 3.5, 3.5)
+            painter.setPen(QPen(ROJO, 1.4))
+            painter.setBrush(QBrush(QColor(255, 240, 240, 240) if encima
+                                    else QColor(255, 255, 255, 235)))
+            painter.drawRoundedRect(r, r.height() / 2.0, r.height() / 2.0)
+            painter.translate(r.left(), r.top())
+            painter.scale(k, k)
+            alto = r.height() / k
+            y = alto / 2.0
+            W = CAPA_REF_W
+            if aplicar:                                  # ① encendido
+                painter.setPen(QPen(ROJO, 1.2))
+                painter.setBrush(QBrush(QColor(255, 215, 215)))
+                painter.drawEllipse(QPointF(14.0, y), 10.0, 10.0)
+            pintar_aplicar(painter, 14.0, y)
+            if aplicar:
+                painter.setPen(QPen(BLANCO, 1.0))
+                painter.setBrush(QBrush(ROJO))
+                painter.drawEllipse(QPointF(23.0, y - 7.0), 3.5, 3.5)
+            painter.setPen(QPen(QColor(90, 90, 90), 1.0))   # ②
+            painter.setBrush(QBrush(QColor.fromRgbF(*rgb)))
+            painter.drawRect(QRectF(28.0, y - 5.0, 10.0, 10.0))
+            f = QFont(painter.font())                    # ③
+            f.setPixelSize(11)
+            f.setBold(False)
+            painter.setFont(f)
+            painter.setPen(TINTA)
+            caja = QRectF(43.0, 0.0, W - (76.0 if botones else 20.0) - 43.0, alto)
+            painter.drawText(caja, Qt.AlignVCenter | Qt.AlignLeft,
+                             QFontMetricsF(f).elidedText(_tr(act), Qt.ElideRight, caja.width()))
+            if not botones:
+                painter.setFont(f)                       # ⑦
+                painter.setPen(ROJO)
+                painter.drawText(QRectF(W - 18.0, 0.0, 12.0, alto), Qt.AlignCenter, "▾")
+                return
+            painter.setPen(QPen(QColor(230, 200, 200), 1.0))
+            painter.drawLine(QPointF(W - 75.0, y - 7.0), QPointF(W - 75.0, y + 7.0))
+            apagado = QColor(175, 175, 175)
+            puede = hay_sel and sel is not None and sel != act    # ④ el cuentagotas
+            if getattr(self, "_gotero", False):
+                painter.setPen(QPen(ROJO, 1.4))
+                painter.setBrush(QBrush(QColor(255, 215, 215)))
+                painter.drawEllipse(QPointF(W - 64.0, y), 9.0, 9.0)
+                color_gotero = ROJO
+            elif puede:
+                painter.setPen(QPen(NARANJA_CAPA, 1.2))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(QPointF(W - 64.0, y), 8.0, 8.0)
+                color_gotero = NARANJA_CAPA
+            else:
+                color_gotero = QColor(130, 130, 130)
+            pintar_gotero(painter, W - 64.0, y, color_gotero, 0.95)
+            hay_obj = not hay_sel or sel is not None
+            pintar_diana(painter, W - 46.0, y, ais,                  # ⑤
+                         (ROJO if ais else VERDE_CAPA) if hay_obj else apagado)
+            pintar_candado(painter, W - 28.0, y + 1.5, bloq,         # ⑥
+                           (ROJO if bloq else VERDE_CAPA) if hay_obj else apagado, 0.85)
+            painter.setFont(f)                           # ⑦
+            painter.setPen(ROJO)
+            painter.drawText(QRectF(W - 18.0, 0.0, 12.0, alto), Qt.AlignCenter, _tr("▾"))
+        finally:
             painter.restore()
+
+    def _tinte_capa(self, painter, c, bajo, fuerte) -> None:
+        """El tinte de la parte del cajetín bajo el ratón."""
+        r = self._rect_capa(c)
+        k = r.width() / CAPA_REF_W
+        painter.setPen(Qt.NoPen)
+        if bajo == "capa_aplicar":
+            painter.setBrush(QBrush(fuerte))
+            painter.drawEllipse(QPointF(r.left() + 14.0 * k, r.center().y()), 11.0 * k, 11.0 * k)
+        elif bajo in ("capa_activa", "capa_aislar", "capa_bloq"):
+            painter.setBrush(QBrush(fuerte))
+            q = self._capa_centros(r)[bajo]
+            painter.drawEllipse(q, 9.0 * k, 9.0 * k)
+        else:
+            suave = QColor(ROJO)
+            suave.setAlphaF(0.07)
+            painter.setBrush(QBrush(suave))
+            painter.drawRoundedRect(r, r.height() / 2.0, r.height() / 2.0)
 
     def _pintar_nav(self, painter, c, encima: bool) -> None:
         self._pastilla(painter, self._rect_nav(c), "Navegador", encima, "arbol")
@@ -4629,11 +6526,15 @@ class Cadena:
         if self.ancla is None:
             return
         r = self._rect_capa(self.ancla)
-        pos = viewport.mapToGlobal(QPoint(round(r.left()), round(r.bottom()) + 2))
+        pos = viewport.mapToGlobal(QPoint(round(r.left()), round(r.bottom()) + 4))
+        if getattr(self, "_globo_puesto", False):
+            QToolTip.hideText()
+            self._globo_puesto = False
         try:
-            self.capas.menu(viewport, pos, seleccion=self._es_sel)
+            self.capas.abrir(viewport, pos)
         except Exception:  # noqa: BLE001
-            log.exception("fallo en el desplegable de capas")
+            log.exception("fallo en el mini panel de capas")
+            viewport.flash_status(_tr("Rosco: no se pudo abrir la lista de capas."), 4000)
         self._sincronizar()
 
     def _zona_quieta(self, p) -> bool:
@@ -4650,12 +6551,17 @@ class Cadena:
             g = self._panel()
             if g is not None and g["marco"].adjusted(-10.0, -10.0, 10.0, 10.0).contains(p):
                 return True
+            if g is not None and any(self._caja_de(forma).adjusted(-10.0, -10.0, 10.0, 10.0).contains(p)
+                                     for _o, forma in self._fly_formas(g)):
+                return True
             q = self._centro_ojo(self.ancla)
             if math.hypot(p.x() - q.x(), p.y() - q.y()) <= OJO_R + 10.0:
                 return True
             if g is not None and g.get("radial"):
                 return False                 # el ojo va encima del rosco, dentro de su marco
             return abs(d.x()) <= 40.0 and q.y() - 10.0 <= p.y() <= self.ancla.y()
+        if self._en_pegado(p):
+            return True                      # el subrosco pegado a su botón
         zona_r = self._r_ext() + 6.0
         if math.hypot(d.x(), d.y()) <= zona_r:
             return True
@@ -4680,6 +6586,9 @@ class Cadena:
             capa = capa.united(nav)
         if capa.adjusted(-10.0, -10.0, CAPA_HUECO + 10.0, 10.0).contains(p):
             return True
+        fila = self._fila_puntos(self.ancla)
+        if fila is not None and fila[2].adjusted(-10.0, -10.0, 10.0, 10.0).contains(p):
+            return True
         medio_capa = (self.tema.capa_w / 2.0 if self.tema.cajetines_plegados
                       else self.tema.capa_w + CAPA_HUECO / 2.0)
         if (self.pos_capa == "abajo" and abs(d.x()) <= medio_capa + 10.0
@@ -4689,7 +6598,7 @@ class Cadena:
         if g is None:
             return False
         if self.panel in PANELES_OJO:
-            return self._en_historial(p)     # el panel de un ojo (historial, ayuda), al lado
+            return self._en_historial(p)     # el panel de un ojo (historial), al lado
         # El submenú (o la diana plegada) y todo el hueco entre el anillo y
         # él, a lo ancho del submenú o del anillo (lo que sea mayor): pasar
         # de un botón al submenú nunca lo cierra.
@@ -4697,11 +6606,23 @@ class Cadena:
         return (abs(d.x()) <= ancho and 0.0 <= d.y() <= g["marco"].bottom() - self.ancla.y() + 10.0)
 
     def _icono_en(self, p):
+        if self._despliegue in ("seccion", "camara") and self._rueda_abierta() and self.ancla is not None:
+            parte = _diana.rueda_parte_en(self._diana_centro(self.ancla), p)
+            for gajo, otra in _diana.PARTIDOS.items():
+                if parte == otra:
+                    parte = gajo             # media orden de un gajo partido: el gajo entero
+            if parte in _diana.RUEDA_GAJOS:
+                idx = self._cubiertos().get(("rueda", _diana.RUEDA_GAJOS.index(parte)))
+                if idx is not None:
+                    return f"opc:{idx}"
         if self._sin_arcos():
             return None
-        for claves, r_int, r_ext, a0, _tam in self._bandas():
-            clave = boton_en(self.ancla, p, r_int, r_ext, claves, TOLERANCIA, a0,
-                             self.tema.barrido)
+        if self._despliegue is not None:
+            idx = self._cubiertos().get(self._hueco_en(p))
+            if idx is not None:
+                return f"opc:{idx}"          # una opción del botón, encima de otro
+        for claves, r_int, r_ext, a0, _tam, barrido in self._bandas():
+            clave = boton_en(self.ancla, p, r_int, r_ext, claves, TOLERANCIA, a0, barrido)
             if clave is not None:
                 return clave or None         # un hueco vacío no es un botón
         for _j, k, r_int, r_ext, a0, b, _tam in self._lados():
@@ -4711,8 +6632,9 @@ class Cadena:
 
     def _sector_de(self, c, clave):
         """El trozo de banda del botón ``clave`` (para teñirlo), o None."""
-        barrido = self.tema.barrido
-        for claves, r_int, r_ext, a0, _tam in self._bandas():
+        if isinstance(clave, str) and clave.startswith("opc:"):
+            return self._sector_opcion(c, int(clave[4:]))
+        for claves, r_int, r_ext, a0, _tam, barrido in self._bandas():
             if clave in claves:
                 paso = barrido / len(claves)
                 return sector(c, r_int, r_ext, a0 + barrido - paso * (claves.index(clave) + 1), paso)
@@ -4723,6 +6645,11 @@ class Cadena:
 
     def _circulo_de(self, c, clave):
         """``(centro, radio)`` del botoncito redondo ``clave``, o None."""
+        if isinstance(clave, str) and clave.startswith("juego:"):
+            fila = self._fila_puntos(c)
+            q = None if fila is None else next(
+                (q for id_juego, _celda, q in fila[0] if f"juego:{id_juego}" == clave), None)
+            return None if q is None else (q, PUNTO_R + 3.0)
         if clave in self._chicos():
             return self._centro_chico(c, clave), CHICO_R
         if clave == "cerrar":
@@ -4736,20 +6663,299 @@ class Cadena:
             return self._centro_menus_sel(c), CHINCHETA_R
         return None
 
-    def _opciones(self, clave):
+    def _opciones(self, clave, todas: bool = False):
         """Las opciones del submenú de ``clave`` (Agrupar es de la mitad de
         selección: sus opciones son acciones, no modos; Desplazar, Escalar y
-        Rotar, los modos de la barra de modificar)."""
-        if clave == "agrupar":
-            return _seleccion.AGRUPAR
+        Rotar, los modos del arco de modificar). Desde la 2.49.0 el botón
+        lleva la última orden elegida y su subrosco, las demás (``todas``:
+        también la del botón)."""
         if clave == "flip":
             return MODOS_FLIP
         if clave == "align":
             return MODOS_ALINEAR
-        if clave in _seleccion.SEMI:
+        if clave == "agrupar":
+            modos = _seleccion.AGRUPAR
+        elif clave in _seleccion.SEMI:
             from ._arco import MODOS as MODOS_SEMI
-            return MODOS_SEMI.get(clave)
-        return MODOS.get(clave)
+            modos = MODOS_SEMI.get(clave)
+        else:
+            modos = MODOS.get(clave)
+        # 2.49.2: sin intercambio; todas, con la elegida marcada (``todas``
+        # se queda por compatibilidad).
+        return modos
+
+    def _modo_boton(self, clave):
+        """La orden que lleva el botón ``clave`` (la última elegida)."""
+        if clave in _seleccion.SEMI and clave != "flip":
+            barra = self._arco_modificar()
+            return barra.modo.get(clave) if barra is not None else None
+        return self.modo.get(clave)
+
+    def _icono_vivo(self, clave):
+        """El icono del botón ``clave``: el de su última orden (o el suyo)."""
+        try:
+            if not isinstance(clave, str) or not (clave in MODOS or clave == "agrupar"
+                                                  or clave in ("move", "scale", "rotate")):
+                return clave
+            modo = self._modo_boton(clave)
+            if _subsub.tiene(clave, modo):
+                return _subsub.icono(_subsub.cara(clave, modo)) or clave
+            return ICONO_MODO.get((clave, modo), clave)
+        except Exception:  # noqa: BLE001
+            return clave
+
+    # -- la última orden de cada botón se recuerda --
+    def _cargar_ultimas(self) -> None:
+        try:
+            from ._ajustes import ajustes
+            s = ajustes("ultimas")
+            for clave in list(MODOS) + ["agrupar"]:
+                modo = s.value(clave, None)
+                todas = MODOS.get(clave) or (_seleccion.AGRUPAR if clave == "agrupar" else ())
+                if modo in todas:
+                    self.modo[clave] = modo
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo leer la última orden de los botones")
+
+    def _guardar_ultimas(self) -> None:
+        try:
+            from ._ajustes import ajustes
+            s = ajustes("ultimas")
+            for clave, modo in self.modo.items():
+                if clave in MODOS or clave == "agrupar":
+                    s.setValue(clave, modo)
+            s.sync()
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo guardar la última orden de los botones")
+
+    def _lanzar(self, viewport, clave) -> None:
+        """Clic izquierdo en un botón (o elegir en su subrosco): su orden,
+        directa, sin subrosco; el rosco se quita hasta acabarla."""
+        modo = self.modo.get(clave)
+        self.panel = None
+        nativa = NATIVAS.get((clave, modo))
+        if nativa is not None:
+            if nativa[0] == "menu":
+                # Abre una ventana de IngeTrazo (Texto 3D, Puente): el rosco se
+                # duerme antes, como con el clic derecho.
+                self._dormir(viewport)
+                self._lanzar_nativa(viewport, nativa)
+                return
+            self._lanzar_nativa(viewport, nativa)
+            self._esconder_para_orden(viewport)
+            return
+        if clave == "pintar":
+            self._pintar(viewport, modo)
+            return
+        if clave == "agrupar":
+            self._accion_sel(viewport, "agrupar", modo)
+            self._sincronizar()
+            return
+        if clave == "texto":
+            self._activar_texto(viewport)
+            return
+        if clave == "empujar" and modo == "empujar/tirar":
+            self._accion_empujar(viewport)
+            return
+        if clave == "rect" and modo in ("esquina", "centro"):
+            self.bases["rect"]._set_from_center(viewport, modo == "centro")
+        if (clave == "seleccionar" and viewport.active_tool is self._select_nativo()
+                and modo not in ("lazo", "dentro")):   # esos dos necesitan el de la barra
+            self.base = clave
+            viewport.flash_status(_tr(self._mensaje_base()), 6000)
+            self._esconder_para_orden(viewport)      # 1.3.0: también se quita
+            return
+        self.base = clave
+        if (clave == "linea" and modo in ("anotar", "borrar anotaciones")
+                and viewport.active_tool is self.por_modo.get(("linea", "anotar"))):
+            self._seleccionar_nativo_un_momento(viewport)   # anotar ↔ borrar: se reactiva
+        self._activar_base(viewport)
+        # 1.3.0: Seleccionar (ventana o lazo) también quita el rosco, para
+        # ver y elegir en el dibujo; vuelve al llamarlo.
+        self._esconder_para_orden(viewport)
+
+    def _esconder_para_orden(self, viewport, tool="activa") -> None:
+        """El rosco se quita mientras dura la orden (vuelve al acabarla)."""
+        self._despliegue = None              # al volver, sin las opciones de antes
+        if self.anclada:
+            self._sincronizar()
+            return
+        self.escondida = True
+        self._tool_escondida = viewport.active_tool if tool == "activa" else tool
+        viewport.setFocus()
+        self._sincronizar()
+
+    def _lanzar_nativa(self, viewport, nativa) -> None:
+        tipo, herr, textos = nativa
+        win = self.app.window
+        hecho = False
+        if tipo == "tool":
+            tools = getattr(win, "_tools", None) or {}
+            activar = getattr(win, "_activate_tool", None)
+            try:
+                if herr in tools:
+                    if callable(activar):
+                        activar(herr)
+                    else:
+                        viewport.set_active_tool(tools[herr])
+                    hecho = viewport.active_tool is tools[herr]
+            except Exception:  # noqa: BLE001
+                log.exception("no se pudo activar %s", herr)
+        if not hecho:
+            try:
+                hecho = _seleccion.disparar_menu(win, textos)
+            except Exception:  # noqa: BLE001
+                log.exception("no se pudo lanzar %s", textos[0])
+        if not hecho:
+            viewport.flash_status(_tr("No encontré la orden «{0}» de IngeTrazo.", textos[0]), 4000)
+
+    def _clave_nativa(self, viewport):
+        """El botón cuya orden de IngeTrazo (Sígueme, Ruta…) está activa, o None."""
+        tools = getattr(self.app.window, "_tools", None) or {}
+        tool = viewport.active_tool
+        for (clave, _modo), (tipo, herr, _t) in NATIVAS.items():
+            if tipo == "tool" and herr in tools and tools[herr] is tool:
+                return clave
+        return None
+
+    def _abrir_subrosco(self, viewport, clave) -> bool:
+        """Clic derecho en un botón: su subrosco, para cambiar de orden.
+        Rosco: con el rosco a la vista, sus opciones en el anillo."""
+        if (self._tiene_despliegue(clave) and self.ancla is not None and self.win is not None
+                and self.win.isVisible() and self.panel is None):
+            self._abrir_despliegue(clave)
+            return True
+        if clave == "flip":
+            QTimer.singleShot(0, lambda: self._activar_simetria(viewport, True))
+            return True
+        if not self._tiene_subrosco(clave):
+            return False
+        self._ocultar_previa()
+        self._previa = None
+        self._pegado = None
+        self._parar_cierre()
+        self.panel = clave
+        self._sincronizar()
+        return True
+
+    # -- el subrosco pegado a su botón (2.50.0): sale al pasar por el botón --
+    def _es_pegado(self) -> bool:
+        return self._pegado is not None and self.panel == self._pegado
+
+    def _panel_pegado(self, c, clave, con_lados, con_final, fins, f, e):
+        """El subrosco que sale al pasar por su botón: de verdad, al 75 %,
+        pegado al botón por fuera (donde salía la vista previa), sin salirse
+        de la ventanita ni de la zona de dibujo."""
+        from . import _rosco
+        f2, e2 = f * PEGADO_ESC, e * PEGADO_ESC
+        modos = self._opciones(clave)
+        n = len(modos)
+        g0 = _rosco.geometria(0.0, 0.0, n, con_lados, con_final, f2)
+        cero, m = g0["centro"], g0["marco"]
+        _rh, r1, _r3, _izq, _alto = _rosco.radios(con_lados, con_final, f2)
+        centro = QPointF(c)
+        trozo = self._sector_de(c, clave)
+        if trozo is not None:
+            b = trozo.boundingRect().center()
+            dx, dy = b.x() - c.x(), b.y() - c.y()
+            largo = math.hypot(dx, dy) or 1.0
+            ux, uy = dx / largo, dy / largo
+            sale = max((trozo.elementAt(i).x - c.x()) * ux + (trozo.elementAt(i).y - c.y()) * uy
+                       for i in range(trozo.elementCount()))
+            d = sale + PREVIA_HUECO + r1
+            centro = QPointF(c.x() + ux * d, c.y() + uy * d)
+        x0, y0 = centro.x() - cero.x(), centro.y() - cero.y()
+        dx, dy = self._meter_dentro(c, QRectF(x0 + m.left(), y0 + m.top(), m.width(), m.height()))
+        g = _rosco.geometria(x0 + dx, y0 + dy, n, con_lados, con_final, f2)
+        g["e"] = e2
+        g["pegado"] = True
+        g["r_modos"] = r1
+        g["chips"] = list(zip(modos, g["chips"]))
+        if con_final:
+            g["finales"] = list(zip(fins, g["finales"]))
+        return g
+
+    def _en_pegado(self, p) -> bool:
+        """``p`` está sobre el subrosco pegado (o su sub-submenú)."""
+        if p is None or not self._es_pegado():
+            return False
+        g = self._panel()
+        if g is None or not g.get("pegado"):
+            return False
+        c = g["centro"]
+        if math.hypot(p.x() - c.x(), p.y() - c.y()) <= g["r_modos"] + 4.0:
+            return True
+        if any(forma.contains(p) for _k, forma in g.get("finales", ())):
+            return True
+        return self._fly is not None and any(forma.contains(p) for _o, forma in self._fly_formas(g))
+
+    def _abrir_pegado(self, clave) -> None:
+        self._parar_cierre()
+        self._fly = None
+        self.panel = clave
+        self._pegado = clave
+        self._sincronizar()
+
+    def _cerrar_pegado(self) -> None:
+        self._parar_cierre()
+        if self._es_pegado():
+            self.panel = None
+            self._fly = None
+        self._pegado = None
+        self._sincronizar()
+
+    def _programar_cierre(self) -> None:
+        """Fuera del botón y de su subrosco pegado: se cierra en un momento
+        (si el ratón vuelve antes, sigue)."""
+        if self._reloj_cierre is None:
+            self._reloj_cierre = QTimer(self.app.window)
+            self._reloj_cierre.setSingleShot(True)
+            self._reloj_cierre.setInterval(PEGADO_CIERRE_MS)
+            self._reloj_cierre.timeout.connect(self._cierre_vencido)
+        if not self._reloj_cierre.isActive():
+            self._reloj_cierre.start()
+
+    def _parar_cierre(self) -> None:
+        if self._reloj_cierre is not None:
+            self._reloj_cierre.stop()
+
+    def _cierre_vencido(self) -> None:
+        if self._despliegue is not None:
+            bajo = self._bajo
+            if not ((isinstance(bajo, str) and bajo.startswith("opc:")) or bajo == self._despliegue):
+                self._cerrar_despliegue()
+            return
+        if not self._es_pegado():
+            return
+        if self._en_pegado(self.cursor_px) or self._bajo == self.panel:
+            return
+        self._cerrar_pegado()
+
+    def _clic_pegado(self, viewport, g, p) -> bool:
+        """Un clic sobre el subrosco pegado: como en el subrosco de siempre;
+        en el centro, la orden del botón (como un clic en él)."""
+        clave = self.panel
+        if self._fly is not None:
+            for orden, forma in self._fly_formas(g):
+                if forma.contains(p):
+                    hueco = self._fly
+                    QTimer.singleShot(0, lambda o=orden, h=hueco, k=clave:
+                                      self._elegir_subsub(viewport, h, o, k))
+                    return True
+        if g["volver"].adjusted(-3, -3, 3, 3).contains(p):
+            self._cerrar_pegado()
+            return True
+        c = g["centro"]
+        en_lados = any(k in g and g[k].contains(p) for k in ("menos", "mas"))
+        if not en_lados and math.hypot(p.x() - c.x(), p.y() - c.y()) <= g["rh"]:
+            self._cerrar_pegado()
+            return self._pulsar(viewport, clave)
+        self._accion_panel(viewport, g, p)
+        if self.panel is None:
+            self._pegado = None
+            self._parar_cierre()
+        self._sincronizar()
+        return True
 
     def _limites(self, c) -> QRectF:
         """Dónde cabe lo de la barra centrada en ``c``: la ventanita y la
@@ -4794,40 +7000,7 @@ class Cadena:
         if c is None:
             return None
         if clave == "ayuda":
-            if not self.tema.rueda:
-                return None
-            # Lo que se ve: la ventanita, recortada al monitor. Si la ayuda
-            # no cabe entera, se acorta y se desplaza con la rueda del ratón.
-            zona = self._zona_visible(c)
-            total = self._ayuda_maqueta()[0]
-            alto = max(120.0, min(AYUDA_MAX_H, total, zona.height()))
-            self._ayuda_sobra = max(0.0, total - alto)
-            self._ayuda_scroll = min(getattr(self, "_ayuda_scroll", 0.0), self._ayuda_sobra)
-            # Al lado de su ojo (de serie, el verde de la derecha); si por ese
-            # lado no cabe, al otro.
-            cual = self._ojo_de("ayuda") or "derecha"
-            q = self._centro_ojo(c, cual)
-            der = c.x() + self.tema.r_ext + 14.0
-            izq = c.x() - self.tema.r_ext - 14.0 - AYUDA_W
-            if cual == "derecha":
-                x0, y0 = der if der + AYUDA_W <= zona.right() else izq, c.y() - alto / 2.0
-            elif cual == "izquierda":
-                x0, y0 = izq if izq >= zona.left() else der, c.y() - alto / 2.0
-            elif cual == "arriba":
-                x0, y0 = q.x() - AYUDA_W / 2.0, q.y() - OJO_R - 12.0 - alto
-            else:
-                x0, y0 = q.x() - AYUDA_W / 2.0, q.y() + OJO_R + 12.0
-            x0 = max(zona.left(), min(x0, zona.right() - AYUDA_W))
-            y0 = max(zona.top(), min(y0, zona.bottom() - alto))
-            fm = QFontMetricsF(self.win.font())
-            pestanas, x = [], x0 + 10.0
-            for i, nombre in enumerate(AYUDA_PESTANAS):
-                w = fm.horizontalAdvance(_tr(nombre)) * 1.12 + 18.0
-                pestanas.append((i, QRectF(x, y0 + 25.0, w, 20.0)))
-                x += w + 4.0
-            return {"marco": QRectF(x0, y0, AYUDA_W, alto), "chips": [], "pestanas": pestanas,
-                    "titulo": QRectF(x0 + 10.0, y0 + 4.0, AYUDA_W - 44.0, 18.0),
-                    "volver": QRectF(x0 + AYUDA_W - 28.0, y0 + 4.0, 18.0, 18.0)}
+            return self._panel_ayuda_rapida(c)
         if clave == "historial":
             if not self.tema.rueda:
                 return None
@@ -4859,17 +7032,19 @@ class Cadena:
             w = 2.0 * (e * _diana.MEDIO + 10.0)
             h = e * (_diana.ARRIBA + _diana.ABAJO) + 16.0
             return {"marco": QRectF(c.x() - w / 2.0, self._y_panel(c), w, h), "chips": []}
-        if clave == "camara":
-            # El subrosco de la Cámara: en lugar de la rueda, en su mismo centro.
+        if clave in OPCIONES_RUEDA:
+            # El subrosco de la Cámara o de la Sección: en lugar de la rueda,
+            # en su mismo centro.
             from . import _rosco
+            opciones = OPCIONES_RUEDA[clave]
             e = self.escala_rosco / 100.0
             f = self.tema.panel_w / 320.0 * e
-            n = len(CAMARA_OPCIONES)
+            n = len(opciones)
             cero = _rosco.geometria(0.0, 0.0, n, False, False, f)["centro"]
             dc = self._diana_centro(c)
             g = _rosco.geometria(dc.x() - cero.x(), dc.y() - cero.y(), n, False, False, f)
             g["e"] = e
-            g["chips"] = list(zip(CAMARA_OPCIONES, g["chips"]))
+            g["chips"] = list(zip(opciones, g["chips"]))
             return g
         if self._opciones(clave) is None:
             return None
@@ -4887,6 +7062,8 @@ class Cadena:
             f = self.tema.panel_w / 320.0 * e
             _rh, r1, r3, izquierda, alto = _rosco.radios(con_lados, con_final, f)
             ancho_panel = izquierda + r1
+            if self._es_pegado():
+                return self._panel_pegado(c, clave, con_lados, con_final, fins, f, e)
         if self._submenu_centrado():
             # Temas A y B: a la derecha de donde estaba el ratón al abrirlo,
             # para no tapar el dibujo; con lo seleccionado encima y la línea de
@@ -4951,7 +7128,8 @@ class Cadena:
     def evento(self, obj, ev) -> bool:
         """Filtro del visor: la barra (cursor o fija), el lazo y la pieza."""
         if not _interruptor.ENCENDIDA:
-            return False
+            # Apagado: solo el triple clic derecho, que lo enciende.
+            return self._derecho_apagado(self.app.viewport, ev.type(), ev)
         t = ev.type()
         vp = self.app.viewport
         if t in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
@@ -4960,6 +7138,8 @@ class Cadena:
             # dibujo. Se descarta hasta que se suelta el botón.
             if t == QEvent.Type.MouseButtonRelease:
                 self._tragar_hasta = 0.0
+            return True
+        if self._evento_gotero(vp, t, ev):
             return True
         if not self._pasar_clic and self._evento_espera(vp, t, ev):
             return True
@@ -4984,7 +7164,7 @@ class Cadena:
             if self._letra_para_buscar(vp, ev):
                 QTimer.singleShot(0, lambda: self._buscar(vp, texto))
                 return True
-            # Un número con una herramienta de la barra de dibujo en marcha: la ventanita
+            # Un número con una herramienta del anillo en marcha: la ventanita
             # de medidas, con un renglón por medida (en vez del cuadro nativo).
             if (texto and (texto.isdigit() or texto in ",.-")
                     and not (ev.modifiers() & (Qt.ControlModifier | Qt.AltModifier))
@@ -5006,6 +7186,16 @@ class Cadena:
             QTimer.singleShot(0, self._salir_encuadre)    # fin del encuadre
             return False
         if t == QEvent.Type.MouseButtonDblClick and ev.button() == Qt.LeftButton:
+            texto = getattr(self, "texto", None)
+            if texto is not None and vp.active_tool is texto:
+                # Texto, como las demás: el doble clic quita el texto que puso
+                # el primer clic y acaba la orden; sobre un texto ya puesto, lo
+                # edita.
+                antes = self._pila_al_pulsar
+                pos = ev.position()
+                self.tragar_clic()
+                QTimer.singleShot(0, lambda: self._doble_texto(vp, antes, pos.x(), pos.y()))
+                return True
             if self._seguir_orden(vp):
                 antes = self._pila_al_pulsar
                 self.tragar_clic()
@@ -5018,7 +7208,7 @@ class Cadena:
                 self.tragar_clic()
                 QTimer.singleShot(0, lambda: self._cancelar_y_deshacer(vp))
                 return True
-            vacio = getattr(vp.active_tool, "_rosco_lt_vacio", None)
+            vacio = getattr(vp.active_tool, atributo("vacio"), None)
             if vacio is not None and vacio.doble():
                 # En el vacío con Seleccionar (haya o no selección): repite la
                 # última orden, aunque se vea la barra de selección.
@@ -5066,6 +7256,8 @@ class Cadena:
         if t == QEvent.Type.MouseMove:
             p = QPointF(ev.position())
             self.cursor_px = p
+            if not ev.buttons():
+                self._orientar_empuje(vp, p)  # Empujar: la flechita hacia fuera de la cara
             self._sincronizar_medidas(vp)    # la ventanita sigue al cursor
             if self.cancelar is not None:
                 self.cancelar.seguir(vp, p)  # y el botoncito de cancelar
@@ -5084,6 +7276,9 @@ class Cadena:
             if self.fijo:
                 self._gesto_diana(p)         # temas A y B: la diana al centro
                 self._gesto_historial(p)     # … y el historial por el ojo amarillo
+            if not ev.buttons() and self._salir_cierra(vp, p):
+                self.cerrar_anillo()         # 2.50.1: sin orden elegida, sale del rosco: se va
+                return False
             self._llevar_rosco(p)            # el rosco acompaña al ratón
             if (self.fijo and not self.anclada and not self._submenu_centrado()
                     and not self._zona_quieta(p)):
@@ -5091,6 +7286,8 @@ class Cadena:
             if not self.fijo:
                 self._reposo.start()         # si se para, la barra se fija
             self._bajo = None                # sobre el visor, no sobre un botón
+            if self._es_pegado() and not self._en_pegado(p):
+                self._programar_cierre()
             self._sincronizar()
         elif t == QEvent.Type.Leave:
             self._reposo.stop()
@@ -5113,7 +7310,7 @@ class Cadena:
                     and self._arco_activo(vp) and not self._buffer(vp))
 
     def _tecla_propia(self, vp, ev) -> bool:
-        """La tecla es de la barra de dibujo (no debe disparar un atajo de IngeTrazo)."""
+        """La tecla es del anillo (no debe disparar un atajo de IngeTrazo)."""
         # Tecleando o dictando una medida: las letras son de la casilla.
         if (self.medidas is not None and self.medidas.isVisible()
                 and (self.medidas.hay_texto() or self.medidas.dictando)
@@ -5127,6 +7324,9 @@ class Cadena:
         if not self._en_juego(self.app.viewport):
             return
         if not self.anclada and not self._submenu_centrado() and not self._zona_quieta(p):
+            if self._salir_cierra(self.app.viewport, p):
+                self.cerrar_anillo()         # 2.50.1: sin orden elegida, sale del rosco: se va
+                return
             self._soltar()
             self._sincronizar()
             return
@@ -5135,17 +7335,103 @@ class Cadena:
             return
         self._gesto_diana(p)                 # temas A y B: la diana al centro
         self._gesto_historial(p)             # … y el historial por el ojo amarillo
-        self._anima_raton(p)
-        self._bajo = (self._chincheta_en(p) or ("menus" if self._menus_sel_en(p) else None)
-                      or self._icono_en(p) or self._diana_en(p) or self._chico_en(p)
-                      or self._ojo_orden_en(p)
-                      or ("capa" if self._capa_en(p) else None)
-                      or ("nav" if self._nav_en(p) else None)
-                      or ("propiedades" if self._props_en(p) else None))
+        punto = self._punto_en(p)
+        if punto is not None:
+            self._bajo = f"juego:{punto}"
+        else:
+            self._bajo = (self._chincheta_en(p) or ("menus" if self._menus_sel_en(p) else None)
+                          or self._icono_en(p) or self._diana_en(p) or self._chico_en(p)
+                          or self._ojo_orden_en(p)
+                          or self._capa_zona(p)
+                          or ("nav" if self._nav_en(p) else None)
+                          or ("propiedades" if self._props_en(p) else None))
+            if self._en_pegado(p):
+                self._bajo = None            # encima del subrosco pegado: lo de debajo no cuenta
+        self._globo_capa()
+        try:
+            self._mirar_fly(p)
+            self._mirar_previa(p)
+        except Exception:  # noqa: BLE001
+            log.exception("fallo al mirar el sub-submenú o la vista previa")
         self._sincronizar()
 
     def raton_clic(self, p: QPointF) -> None:
         self.clic_en_selector(self.app.viewport, p)
+
+    # -- mantener pulsado deshacer o rehacer: la lista de los últimos pasos --
+    def _nombre_paso(self, vp):
+        """El nombre de la orden con la que se está haciendo algo ahora (None:
+        se nombrará por el tipo de paso)."""
+        tool = vp.active_tool
+        if tool is None or tool is self._select_nativo() or tool is self.bases["seleccionar"]:
+            return None
+        if tool is self.push:
+            return _tr("Empujar / tirar")
+        if tool is getattr(self, "texto", None):
+            return _tr("Texto")
+        if tool is getattr(self, "simetria", None):
+            return _tr("Simetría")
+        if self._es_base(tool):
+            clave = getattr(tool, "clave", None)
+            return _tr(NOMBRES.get(clave, clave or "").split(":")[0]) or None
+        semi = self._semi_activa(vp)
+        if semi is not None:
+            return _tr(NOMBRES.get(semi, semi).split(":")[0])
+        nombre = getattr(tool, "name", None)
+        return _tr(str(nombre).replace(con_nombre("Rosco · "), "")) if nombre else None
+
+    def pulsacion_propia(self, p) -> bool:
+        """De la ventanita: mantener pulsado deshacer o rehacer abre la lista
+        de sus últimos pasos. True = abierta (el soltar ya no es un clic)."""
+        clave = self._chico_en(p)
+        if clave not in ("deshacer", "rehacer") or self.ancla is None or self.pasos is None:
+            return False
+        vp = self.app.viewport
+        nombres = self.pasos.ultimos(vp, clave)
+        if not nombres or not _edicion.con("pasos"):
+            return False
+        from ._pasos import ListaPasos
+
+        def elegir(n):
+            for _i in range(n):
+                self.diana.usar(vp, clave)
+            vp.flash_status(_tr("Deshechos {0} pasos.", n) if clave == "deshacer"
+                            else _tr("Rehechos {0} pasos.", n), 3000)
+            self._sincronizar()
+        q = self._centro_chico(self.ancla, clave)
+        izquierda = q.x() < self.ancla.x()
+        x = q.x() + (CHICO_R if izquierda else -CHICO_R)
+        lista = ListaPasos(self.app.window, clave, nombres, elegir)
+        lista.mostrar(vp.mapToGlobal(QPoint(round(x), round(q.y() + CHICO_R + 6.0))), izquierda)
+        return True
+
+    # -- mantener pulsado un botón del rosco = hablar (órdenes por voz) --
+    def _voz(self):
+        if not _edicion.con("voz_ordenes"):
+            return None
+        voz = ordenes_voz(self.app.window)
+        if voz is None or not callable(getattr(voz, "empezar", None)):
+            return None
+        return voz
+
+    def voz_empezar(self, p) -> bool:
+        """De la pulsación larga de la ventanita: sobre un botón del rosco
+        principal (bandas, huecos de los lados, botoncitos), como mantener la
+        tecla de órdenes por voz. True = escuchando hasta soltar."""
+        if p is None or self.panel == "vistas":
+            return False
+        if self._icono_en(p) is None and self._chico_en(p) is None:
+            return False
+        voz = self._voz()
+        if voz is None:
+            return False
+        voz.empezar("ordenes")
+        return True
+
+    def voz_parar(self) -> None:
+        voz = self._voz()
+        if voz is not None:
+            voz.parar()
 
     # -- el rosco en espera: pulsar en vacío (el hueco del centro, fuera del anillo) --
     # -- el botón derecho --
@@ -5161,61 +7447,261 @@ class Cadena:
                      QEvent.Type.MouseButtonRelease) or ev.button() != Qt.RightButton:
             return False
         if t == QEvent.Type.MouseButtonRelease:
+            if getattr(self, "_derecho_pulsado", False):
+                self._derecho_pulsado = False
+                self._soltar_derecho(vp)
+                return True
             return self._tragar_menu         # la pulsación fue nuestra: el visor no la ve
         if ev.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier | Qt.AltModifier):
             return False
-        tool = vp.active_tool
-        con_orden = self._cancelable(vp) and tool is not self.espera
-        if not con_orden and not self._derecho_en_vacio(vp, ev):
-            return False                     # sobre un objeto: el menú de IngeTrazo
-        if con_orden and self._editando(vp) and not self._derecho_en_vacio(vp, ev):
-            # Orden de editar, encima de un objeto: termina y deja pasar el clic
-            # para que salga el menú de IngeTrazo de ese objeto.
-            if self._reloj_derecho is not None and self._reloj_derecho.isActive():
-                self._reloj_derecho.stop()
-                self._derecho = None
+        if self.aplicar_capa and t == QEvent.Type.MouseButtonPress:
+            # Aplicar capa sin selección dura hasta el clic derecho.
+            self._apagar_aplicar_capa(vp)
+            self._tragar_menu = True
+            return True
+        if (t == QEvent.Type.MouseButtonPress and self.panel is None and self.ancla is not None
+                and vp.active_tool is self.espera and self._rosco_a_la_vista(vp)):
+            # El rosco aún va con el cursor (no se ha quedado fijo) y el clic
+            # derecho cae en un botón: su subrosco, como sobre el rosco fijo.
+            p = QPointF(ev.position())
+            clave = self._ojo_orden_en(p) or self._chico_en(p) or self._icono_en(p)
+            if clave is not None and (clave == "flip" or self._tiene_subrosco(clave)):
+                self._tragar_menu = True
+                QTimer.singleShot(0, lambda: self._abrir_subrosco(vp, clave))
+                return True
+        # Reparto de la 2.48.0: el derecho maneja el rosco. Corto: muestra u
+        # oculta el rosco (con orden: la termina y abre su subrosco; paso a
+        # paso hacia atrás). Doble: deshacer (con orden: un paso atrás).
+        # Triple, sin orden: apaga Rosco. Sostenido (el aro): el menú de
+        # IngeTrazo. Se decide al soltar.
+        self._tragar_menu = True
+        self._derecho_pulsado = True
+        self._sostenido = False
+        self._derecho_pos = QPoint(ev.position().toPoint())
+        if self._reloj_derecho is None:
+            self._reloj_derecho = QTimer(self.app.window)
+            self._reloj_derecho.setSingleShot(True)
+            self._reloj_derecho.timeout.connect(self._derecho_tiempo)
+        if not self._reloj_derecho.isActive():
+            # El primero de la serie: qué haría un clic solo, ahora.
+            self._n_derecho = 0
+            tool = vp.active_tool
+            con_orden = self._cancelable(vp) and tool is not self.espera
+            self._derecho_con_orden = con_orden
+            if con_orden and getattr(self, "_tras_seccion", False):
+                self._derecho = "seccion"    # desplazando el plano: otro plano
+            elif con_orden:
+                self._derecho = "atras" if self._recien_subrosco(vp) else "orden"
+            elif self._rosco_a_la_vista(vp) and (self.panel is not None
+                                                  or tool is not self.bases["seleccionar"]):
+                self._derecho = "atras" if self.panel is not None else "seleccionar"
+            elif self._objeto_bajo(vp, ev):
+                # 2.49.3: sobre un objeto, el menú de IngeTrazo; en vacío, el rosco.
+                self._derecho = "menu"
+            elif tool is self.bases["seleccionar"]:
+                # La orden Seleccionar del rosco (con o sin lazo): vuelve su subrosco.
+                self._derecho = "subsel"
+            else:
+                self._derecho = "rosco" if _seleccion.opcion("derecho_rosco") else "menu"
+        self._reloj_derecho.stop()           # se espera a soltar
+        if not _seleccion.opcion("derecho_sostenido") or not _edicion.con("sostener"):
+            return True
+        if self._reloj_sostener is None:
+            from ._sostener import SOSTENER_MS, AroSostener
+            self._aro = AroSostener(self.app.window)
+            self._reloj_sostener = QTimer(self.app.window)
+            self._reloj_sostener.setSingleShot(True)
+            self._reloj_sostener.setInterval(SOSTENER_MS)
+            self._reloj_sostener.timeout.connect(self._derecho_sostenido)
+        self._reloj_sostener.start()
+        self._aro.empezar(vp.mapToGlobal(self._derecho_pos))
+        return True
+
+    def _soltar_derecho(self, vp) -> None:
+        """Se soltó el derecho: si no salió el menú, es un clic más de la serie."""
+        if self._reloj_sostener is not None:
+            self._reloj_sostener.stop()
+        if self._aro is not None:
+            self._aro.parar()
+        if self._sostenido:
+            # El aro se llenó: el menú sale ahora, al soltar (abierto con el
+            # botón apretado, Qt lo cerraba al soltarlo).
+            self._sostenido = False
+            QTimer.singleShot(0, lambda: self._abrir_menu_sostenido(vp))
+            return
+        self._n_derecho = getattr(self, "_n_derecho", 0) + 1
+        n = self._n_derecho
+        if (self._derecho_con_orden or not _seleccion.opcion("triple_derecho")) and n >= 2:
+            # Con orden no hay triple: el doble es ya un paso atrás.
+            que, self._derecho, self._n_derecho = self._derecho, None, 0
+            self._deshacer_al_momento()
+            QTimer.singleShot(0, lambda: self._derecho_doble(vp, que))
+            return
+        if not self._derecho_con_orden and n >= 3:
+            self._derecho, self._n_derecho = None, 0
+            self._derecho_ya = None
+            QTimer.singleShot(0, self._apagar_rosco)
+            return
+        if n == 1 and self._derecho in DERECHO_AL_MOMENTO:
+            # 1.8.0: el rosco sale ya, sin esperar el tiempo del doble clic.
+            que = self._derecho_ya = self._derecho
+            QTimer.singleShot(0, lambda: self._derecho_al_momento(que))
+        self._reloj_derecho.start(QApplication.doubleClickInterval())
+
+    def _derecho_tiempo(self) -> None:
+        """Pasó el tiempo de otro clic: uno solo o un doble."""
+        n, self._n_derecho = getattr(self, "_n_derecho", 0), 0
+        if n >= 2:
+            que, self._derecho = self._derecho, None
+            self._deshacer_al_momento()
+            self._derecho_doble(self.app.viewport, que)
+        elif n == 1:
+            self._derecho_solo()
+
+    def _derecho_sostenido(self) -> None:
+        """El derecho sostenido hasta llenar el aro: queda lleno y, al soltar,
+        el menú de IngeTrazo (``_abrir_menu_sostenido``)."""
+        vp = self.app.viewport
+        self._sostenido = True
+        self._n_derecho = 0
+        self._derecho = None
+        if self._reloj_derecho is not None:
+            self._reloj_derecho.stop()
+        if self._aro is not None:
+            self._aro.lleno()                # se queda lleno hasta soltar
+
+    def _abrir_menu_sostenido(self, vp) -> None:
+        """Tras soltar el derecho sostenido: el menú de IngeTrazo de lo que
+        haya debajo (con una orden, antes se termina)."""
+        if self._cancelable(vp) and vp.active_tool is not self.espera:
             if self._en_marcha(vp):
                 self._cancelar(vp)
             if self._cancelable(vp):
                 self._terminar_orden(vp)
-            self._tragar_menu = False
+        elif self._rosco_a_la_vista(vp):
+            self._soltar()
+            self._sincronizar()
+        self._menu_ingetrazo(vp)
+
+    def _derecho_apagado(self, vp, t, ev) -> bool:
+        """Con Rosco apagado solo se vigila el triple clic derecho, que lo
+        enciende. Cada clic espera lo que dura un doble clic; si no llega el
+        tercero, sale el menú de IngeTrazo como siempre. Si otra variante
+        está encendida, no se toca nada."""
+        inter = getattr(self.app.window, atributo("interruptor"), None)
+        if (inter is None or not _seleccion.opcion("triple_derecho")
+                or any(o.encendida() for o in inter._otros())):
             return False
-        self._tragar_menu = True
-        if self._reloj_derecho is None:
-            self._reloj_derecho = QTimer(self.app.window)
-            self._reloj_derecho.setSingleShot(True)
-            self._reloj_derecho.timeout.connect(self._derecho_solo)
-        if self._reloj_derecho.isActive():   # el segundo clic: doble clic derecho
-            self._reloj_derecho.stop()
-            que, self._derecho = self._derecho, None
-            QTimer.singleShot(0, lambda: self._derecho_doble(vp, que))
+        if t == QEvent.Type.ContextMenu:
+            if self._tragar_menu:
+                self._tragar_menu = False
+                return True
+            return False
+        if t not in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick,
+                     QEvent.Type.MouseButtonRelease) or ev.button() != Qt.RightButton:
+            return False
+        if ev.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier | Qt.AltModifier):
+            return False
+        if t == QEvent.Type.MouseButtonRelease:
             return True
-        # Paso a paso hacia atrás: con una orden, termina y abre su subrosco;
-        # en el subrosco (o la rueda), al rosco principal; en el rosco
-        # principal, Seleccionar y el rosco se esconde. Sin orden y sin rosco,
-        # el menú de IngeTrazo (pasado el tiempo del doble, que deshace).
-        if con_orden and getattr(self, "_tras_seccion", False):
-            self._derecho = "seccion"        # desplazando el plano: otro plano
-        elif con_orden:
-            self._derecho = "atras" if self._recien_subrosco(vp) else "orden"
-        elif self._rosco_lt_a_la_vista(vp):
-            self._derecho = "atras" if self.panel is not None else "seleccionar"
-        else:
-            self._derecho = "menu"
+        self._tragar_menu = True
+        if self._reloj_apagado is None:
+            self._reloj_apagado = QTimer(self.app.window)
+            self._reloj_apagado.setSingleShot(True)
+            self._reloj_apagado.timeout.connect(lambda: self._menu_apagado(self.app.viewport))
+        self._n_apagado = (getattr(self, "_n_apagado", 0) + 1) if self._reloj_apagado.isActive() else 1
         self._derecho_pos = QPoint(ev.position().toPoint())
-        self._reloj_derecho.start(QApplication.doubleClickInterval())
+        if self._n_apagado >= 3:
+            self._reloj_apagado.stop()
+            self._n_apagado = 0
+            QTimer.singleShot(0, inter.encender)
+            return True
+        self._reloj_apagado.start(QApplication.doubleClickInterval())
         return True
 
-    def _rosco_lt_a_la_vista(self, vp) -> bool:
+    def _menu_apagado(self, vp) -> None:
+        self._n_apagado = 0
+        self._menu_ingetrazo(vp)
+        self._tragar_menu = True
+
+    def _vigilar_visor(self) -> None:
+        """IngeTrazo cambia de visor (otro documento, o lo rehace al abrir
+        uno): el filtro de ratón, el cursor lápiz y las ventanitas pasan al
+        visor nuevo. Sin esto, el visor viejo se borraba con el filtro dentro
+        y Rosco dejaba de oír los clics (2.49.2)."""
+        vp = self.app.viewport
+        if vp is None or vp is getattr(self, "_vp_enganchado", None):
+            return
+        self._vp_enganchado = vp
+        try:
+            self._filtro = _Filtro(self, vp)
+            vp.installEventFilter(self._filtro)
+            self._instalar_lapiz(vp)
+            for flot in (self.win, getattr(self.cancelar, "win", None)):
+                if flot is not None:
+                    flot.vp = vp
+            if self.medidas is not None:
+                self.medidas.vp = vp
+            barra = self._arco_modificar()
+            if barra is not None and callable(getattr(barra, "reenganchar", None)):
+                barra.reenganchar(vp)
+            log.info("Rosco: enganchado al visor nuevo")
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo enganchar Rosco al visor nuevo")
+
+    def _ventanas_ajenas(self) -> list:
+        """Las ventanas del gestor de barras, de la biblioteca de texturas y el mini panel
+        de capas del cajetín (las que haya)."""
+        win = self.app.window
+        gestor = gestor_barras(win)
+        return [w for w in (getattr(gestor, "_master", None) if gestor is not None else None,
+                            getattr(texturas(win), "ventana", None),
+                            getattr(getattr(self, "capas", None), "mini", None))
+                if w is not None]
+
+    def _vigilar_ajenas(self) -> None:
+        """Al abrirse el gestor de barras o la biblioteca de texturas, el rosco se esconde
+        (como el clic derecho: queda Seleccionar)."""
+        abiertas = set()
+        for w in self._ventanas_ajenas():
+            try:
+                if w.isVisible():
+                    abiertas.add(id(w))
+            except RuntimeError:             # ventana ya borrada
+                continue
+        nuevas = abiertas - getattr(self, "_ajenas", set())
+        self._ajenas = abiertas
+        if not nuevas:
+            return
+        vp = self.app.viewport
+        try:
+            if self._rosco_a_la_vista(vp) and not (self._cancelable(vp)
+                                                    and vp.active_tool is not self.espera):
+                self._derecho_a_seleccionar(vp)
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo esconder el rosco")
+
+    def _rosco_a_la_vista(self, vp) -> bool:
         """El rosco se ve: fijo en su ventanita o siendo el cursor."""
         return self._en_juego(vp) and self.win is not None and (self.win.isVisible()
                                                                 or self._cursor_puesto)
+
+    def _objeto_bajo(self, vp, ev) -> bool:
+        """Hay un objeto (cara, arista, grupo…) bajo el clic."""
+        p = ev.position()
+        sel = self._select_nativo()
+        try:
+            if sel is not None and callable(getattr(sel, "_pick", None)):
+                return sel._pick(vp, p.x(), p.y()) is not None
+            return vp.pick_group(p.x(), p.y()) is not None
+        except Exception:  # noqa: BLE001
+            return False
 
     def _derecho_en_vacio(self, vp, ev) -> bool:
         """Sin orden: el clic derecho es nuestro solo en el vacío (con el rosco
         llamado sin orden, en cualquier sitio: lo cierra). Sobre un objeto,
         también con el anillo de selección, es el menú de IngeTrazo."""
-        if vp.active_tool is self.espera and self._rosco_lt_a_la_vista(vp):
+        if vp.active_tool is self.espera and self._rosco_a_la_vista(vp):
             return True
         sel = self._select_nativo()
         if sel is None or not callable(getattr(sel, "_pick", None)):
@@ -5229,6 +7715,28 @@ class Cadena:
     def _derecho_solo(self) -> None:
         """Pasó el tiempo del doble clic: era un clic derecho solo."""
         que, self._derecho = self._derecho, None
+        if getattr(self, "_derecho_ya", None) is not None:
+            self._derecho_ya = None          # ya se hizo al soltar (1.8.0)
+            return
+        self._hacer_derecho(que)
+
+    def _derecho_al_momento(self, que) -> None:
+        """1.8.0: lo que no espera al doble clic se hace nada más soltar; si
+        llega otro clic, se quita (ver ``_deshacer_al_momento``)."""
+        if self._derecho != que or self._derecho_ya != que:
+            return                           # ya llegó el segundo clic
+        self._hacer_derecho(que)
+
+    def _deshacer_al_momento(self) -> None:
+        """Llegó el doble (o el triple) tras haber sacado ya el rosco: se quita."""
+        ya, self._derecho_ya = getattr(self, "_derecho_ya", None), None
+        if ya in ("rosco", "subsel"):
+            try:
+                self.cerrar_anillo()
+            except Exception:  # noqa: BLE001
+                log.exception("no se pudo quitar el rosco del primer clic")
+
+    def _hacer_derecho(self, que) -> None:
         vp = self.app.viewport
         if que == "orden":
             if self._cancelable(vp):
@@ -5240,12 +7748,21 @@ class Cadena:
                     self._terminar_orden(vp)
                     vp.flash_status(_tr("Orden terminada: vuelve Seleccionar."), 2500)
                 if not self._cancelable(vp):
-                    self.activar()           # y sale el rosco, en el cursor…
-                    if clave is not None:    # …con el submenú desde el que se eligió
-                        self._pulsar(vp, clave)
-                        self._marcar_subrosco(vp, clave)
+                    # 1.10.0: sale el rosco principal, en el cursor (sin las
+                    # opciones de la orden que se acaba de terminar).
+                    self.activar()
+                    self._subrosco_derecho = None
+                    del clave
         elif que == "menu":
             self._menu_ingetrazo(vp)
+        elif que == "rosco":
+            self.activar()                   # el rosco, en el cursor
+        elif que == "subsel":
+            # El rosco principal en el cursor (1.10.0: sin las opciones de
+            # Seleccionar), con su lazo o «dentro de grupos» como estaba.
+            lazo = self.modo.get("seleccionar")
+            self.activar()
+            self.modo["seleccionar"] = lazo
         elif que == "atras":
             self._subrosco_derecho = None
             if self.panel in PANELES_OJO or self.panel == "vistas":
@@ -5296,13 +7813,18 @@ class Cadena:
         """El botón del rosco con submenú desde el que se eligió la orden
         activa (para volver a abrirlo al terminarla), o None."""
         tool = vp.active_tool
+        nativa = self._clave_nativa(vp)
+        if nativa is not None:
+            return nativa
+        if tool is getattr(self, "texto", None):
+            return "texto"
         if tool is self.push or self._es_base(tool):
             return self.base if self.base in MODOS else None
         if tool is getattr(self, "simetria", None):
             return "flip"
         if self._pintando(vp):
             return "pintar" if "pintar" in MODOS else None
-        barra = self._barra_modificar()
+        barra = self._arco_modificar()
         if barra is None:
             return None
         try:
@@ -5310,7 +7832,7 @@ class Cadena:
         except Exception:  # noqa: BLE001
             return None
         if clave == "pushpull":
-            return "empujar"
+            return "empujar"                 # su subrosco (2.49.0)
         from ._arco import MODOS as MODOS_SEMI
         boton = barra._boton_de(clave) if clave else None
         return boton if boton in MODOS_SEMI else None
@@ -5332,6 +7854,15 @@ class Cadena:
         rosco se esconde."""
         vp = self.app.viewport
         self._subrosco_derecho = None
+        if self._rueda_abierta() and self._diana_en(p) == "seccion":
+            self.panel = "seccion_sub"         # 2.49.0: el subrosco de la sección
+            self._sincronizar()
+            return
+        if self.panel is None and not self._rueda_abierta():
+            # 2.49.0: sobre un botón con subrosco, se abre (para cambiar de orden).
+            clave = self._ojo_orden_en(p) or self._chico_en(p) or self._icono_en(p)
+            if clave is not None and self._abrir_subrosco(vp, clave):
+                return
         if self.panel is not None:
             if self.panel in PANELES_OJO or self.panel == "vistas":
                 if self.panel == "vistas":
@@ -5357,7 +7888,13 @@ class Cadena:
         return math.hypot(p.x() - self.ancla.x(), p.y() - self.ancla.y()) < r
 
     def raton_doble(self, p: QPointF) -> bool:
-        """Doble clic en el centro del rosco: repite la última orden."""
+        """Doble clic en el centro del rosco: repite la última orden. En el
+        botón Apagar: apaga Rosco."""
+        if (self._reloj_apagar is not None and self._reloj_apagar.isActive()
+                and "apagar" in (self._chico_en(p), self._icono_en(p))):
+            self._reloj_apagar.stop()
+            self._apagar_rosco()
+            return True
         if self._en_centro(p):
             QTimer.singleShot(0, self.repetir_ultima)
             return True
@@ -5366,7 +7903,7 @@ class Cadena:
     def _derecho_doble(self, vp, que) -> None:
         if que == "orden":
             self._atras_paso(vp)
-        elif que in ("rosco", "menu", "atras", "seleccionar"):
+        elif que in ("rosco", "menu", "atras", "seleccionar", "subsel"):
             self.diana.usar(vp, "deshacer")
 
     def _atras_paso(self, vp) -> None:
@@ -5458,6 +7995,8 @@ class Cadena:
         if largo:
             self.win.ver_modelo(False)
             self.pulsacion_soltada(p)
+        elif pulso is not None and self._en_centro(pulso[0]):
+            pass                             # el centro del rosco: el clic no lo cierra (2.48.2)
         elif pulso is not None:
             QTimer.singleShot(0, lambda: self._repetir_clic(pulso))
 
@@ -5468,7 +8007,7 @@ class Cadena:
         from PySide6.QtGui import QMouseEvent
         vp = self.app.viewport
         pos, glob, teclas = pulso
-        self.cerrar_barra_dibujo()
+        self.cerrar_anillo()
         sel = vp.active_tool
         original = getattr(sel, "_clic_original", None)
         propio = sel.__dict__.get("on_click") if hasattr(sel, "__dict__") else None
@@ -5509,10 +8048,60 @@ class Cadena:
         self._sincronizar()
         self.win.update()
 
+    def _abrir_sel_rapida(self, viewport) -> None:
+        """3.1.0: la ventana de Selección rápida (una sola, se reutiliza)."""
+        if not _edicion.con("sel_rapida"):
+            return
+        try:
+            from ._sel_rapida import SeleccionRapida
+            v = getattr(self, "_ventana_sel_rapida", None)
+            if v is None:
+                v = self._ventana_sel_rapida = SeleccionRapida(self.app.window, viewport, self._parsear)
+            v.abrir()
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo abrir la Selección rápida")
+            viewport.flash_status(_tr("No se pudo abrir la Selección rápida."), 4000)
+
+    def raton_rueda(self, p, delta: int) -> bool:
+        """3.1.0: la rueda del ratón sobre el rosco principal pasa al grupo de
+        herramientas siguiente (hacia abajo) o al anterior (hacia arriba), en
+        el orden de los puntos, dando la vuelta. False: la rueda sigue
+        haciendo zoom (fuera del rosco, en la rueda de vistas, con un
+        submenú abierto o con un solo grupo)."""
+        if (not delta or self.ancla is None or p is None or self.panel is not None
+                or self._sin_arcos() or self._previsualizando):
+            return False
+        orden = [j for j, _n, _c in sorted(self.huecos.juegos(),
+                                           key=lambda juego: juego[0] != _huecos.ID_GENERAL)]
+        if len(orden) < 2:
+            return False
+        if math.hypot(p.x() - self.ancla.x(), p.y() - self.ancla.y()) > self._r_ext() + 2.0 * CHICO_R + 4.0:
+            return False
+        # Ratones de rueda fina: un paso por cada «muesca» (120) acumulada.
+        self._rueda_acum = getattr(self, "_rueda_acum", 0) + delta
+        if abs(self._rueda_acum) < 120:
+            return True
+        paso = 1 if self._rueda_acum < 0 else -1
+        self._rueda_acum = 0
+        activo = self.huecos.id_activo
+        i = orden.index(activo) if activo in orden else 0
+        destino = orden[(i + paso) % len(orden)]
+
+        def pasar():
+            if self.huecos.activar(destino):
+                self.app.viewport.flash_status(
+                    _tr("Grupo de herramientas: {0}", self.huecos.nombre_visible(destino)), 2000)
+        QTimer.singleShot(0, pasar)
+        return True
+
     def raton_fuera(self) -> None:
-        self._anima_raton(None)              # la pantallita vuelve a su bucle
-        if self._bajo is not None:
+        if self._es_pegado() or self._despliegue is not None:
+            self._programar_cierre()
+        if self._bajo is not None or self._previa is not None:
             self._bajo = None
+            self._previa = None
+            self._ocultar_previa()
+            self._globo_capa()
             self._sincronizar()
 
     def clic_en_selector(self, viewport, screen) -> bool:
@@ -5521,9 +8110,27 @@ class Cadena:
         if not self._arco_activo(viewport):
             return False
         p = QPointF(screen)
+        self._previa = None                   # cualquier clic quita la vista previa
+        self._ocultar_previa()
+        if self._es_pegado():
+            g = self._panel()
+            if g is not None and self._en_pegado(p):
+                return self._clic_pegado(viewport, g, p)
+            self._cerrar_pegado()             # fuera: el clic es para lo de debajo
+        self._desp_quitado = None
+        if self._despliegue is not None:
+            bajo = self._icono_en(p)
+            if isinstance(bajo, str) and bajo.startswith("opc:"):
+                return self._elegir_opcion(viewport, int(bajo[4:]))
+            self._desp_quitado = self._despliegue    # (la cámara: otro clic las quita)
+            self._despliegue = None
         pin = self._chincheta_en(p)
         if pin is not None:
             QTimer.singleShot(0, lambda: self._pulsar_chincheta(viewport, pin))
+            return True
+        punto = self._punto_en(p)
+        if punto is not None:
+            QTimer.singleShot(0, lambda: self.huecos.activar(punto))
             return True
         if self._vistas_en(p):
             # La diana plegada: se abre o se cierra debajo del anillo.
@@ -5534,10 +8141,14 @@ class Cadena:
             q = self._centro_menus_sel(self.ancla)
             QTimer.singleShot(0, lambda: self._abrir_menus(viewport, q))
             return True
-        if self._capa_icono_en(p):
-            QTimer.singleShot(0, lambda: self._menu_aplicar_capa(viewport))
+        zona_capa = self._capa_zona(p)
+        if zona_capa == "capa_aplicar":
+            QTimer.singleShot(0, lambda: self._alternar_aplicar_capa(viewport))
             return True
-        if self._capa_en(p):
+        if zona_capa in ("capa_activa", "capa_aislar", "capa_bloq"):
+            QTimer.singleShot(0, lambda: self._boton_capa(viewport, zona_capa))
+            return True
+        if zona_capa == "capa":
             QTimer.singleShot(0, lambda: self._menu_capas(viewport))
             return True
         if self._nav_en(p):
@@ -5559,12 +8170,25 @@ class Cadena:
             QTimer.singleShot(0, lambda: self._usar_diana(viewport, parte))
             return True
         clave = self._icono_en(p)
+        if clave in UNIDOS:
+            return self._pulsar(viewport, UNIDOS_PROPIA[clave])   # su orden propia
+        if clave is not None and self._tiene_despliegue(clave):
+            self._poner_orden_propia(clave)  # sus opciones ya no la repiten
         if clave is not None:
             return self._pulsar(viewport, clave)
         g = self._panel()
+        if g is not None and self._fly is not None:
+            for orden, forma in self._fly_formas(g):
+                if forma.contains(p):
+                    hueco, clave_panel = self._fly, self.panel
+                    QTimer.singleShot(0, lambda o=orden, h=hueco, k=clave_panel:
+                                      self._elegir_subsub(viewport, h, o, k))
+                    return True
         if g is not None and g["marco"].contains(p):
             if "volver" in g and g["volver"].adjusted(-3, -3, 3, 3).contains(p):
                 QTimer.singleShot(0, lambda: self._volver_al_anillo(viewport))
+            elif self._en_centro_subrosco(viewport, g, p):
+                QTimer.singleShot(0, lambda: self._aceptar_subrosco(viewport))
             else:
                 self._accion_panel(viewport, g, p)
             self._sincronizar()
@@ -5575,7 +8199,7 @@ class Cadena:
         """La flecha ‹ del submenú: al rosco principal. Si había una orden, se
         cancela y queda el lápiz, como en Seleccionar. Desde el subrosco de
         la Cámara, a la rueda."""
-        if self.panel == "camara":
+        if self.panel in OPCIONES_RUEDA:
             self.panel = "vistas"
             self._sincronizar()
             return
@@ -5612,10 +8236,31 @@ class Cadena:
                 _seleccion.accion(self.app, viewport, clave)
         except Exception:  # noqa: BLE001
             log.exception("fallo en la barra de selección (%s %s)", clave, modo)
-            viewport.flash_status(_tr("Rosco LT: no se pudo {0}.", clave), 4000)
+            viewport.flash_status(_tr("Rosco: no se pudo {0}.", clave), 4000)
         else:
             if habia:
                 self._orden_hecha(viewport)  # borrar, copiar, crear…: se duerme
+        self._sincronizar()
+
+    def _en_centro_subrosco(self, viewport, g, p) -> bool:
+        """``p`` cae en el disco del centro del subrosco de una orden elegida
+        (sin contar los botones que hay en él)."""
+        if (not g.get("radial") or self.panel == "agrupar"
+                or not (self._cancelable(viewport) or self.panel == "seleccionar")):
+            return False
+        if any(k in g and g[k].contains(p) for k in ("menos", "mas")):
+            return False
+        c = g["centro"]
+        return math.hypot(p.x() - c.x(), p.y() - c.y()) <= g["rh"]
+
+    def _aceptar_subrosco(self, viewport) -> None:
+        """Clic en el centro del subrosco: valen las opciones marcadas y se
+        quita, para empezar con el ratón. No vuelve hasta acabar la orden."""
+        self.panel = None
+        if not self.anclada:
+            self.escondida = True
+            self._tool_escondida = viewport.active_tool
+        viewport.setFocus()
         self._sincronizar()
 
     def _accion_panel(self, viewport, g, p) -> None:
@@ -5628,13 +8273,15 @@ class Cadena:
                         viewport, _diana.CAMARA_HERR[k], _diana.NOMBRES[k]))
                     return
             return
+        if clave == "seccion_sub":
+            for k, r in g["chips"]:
+                if r.contains(p):            # interruptor: el subrosco sigue abierto
+                    QTimer.singleShot(0, lambda k=k: self._alternar_seccion(viewport, k))
+                    return
+            return
         if clave == "ayuda":
-            for i, r in g.get("pestanas", ()):
-                if r.contains(p) and i != self._ayuda_pagina:
-                    self._ayuda_pagina = i
-                    self._ayuda_scroll = 0.0
-                    self._sincronizar()
-            return                           # lo demás, solo para leer
+            QTimer.singleShot(0, lambda: self._abrir_ayuda(viewport))
+            return
         if clave == "historial":
             for i, r in g.get("entradas", ()):
                 if r.contains(p):
@@ -5658,13 +8305,20 @@ class Cadena:
                     return
             return
         if clave in _seleccion.SEMI:
-            barra = self._barra_modificar()
+            barra = self._arco_modificar()
             for modo, r in g["chips"]:
                 if r.contains(p) and barra is not None:
                     def elegir(modo=modo):
-                        barra.elegir_modo(clave, modo)
+                        if self._semi_activa(viewport) != clave:
+                            barra.modo[clave] = modo
+                            self._accion_semi(viewport, clave)
+                        else:
+                            barra.elegir_modo(clave, modo)
+                        self.panel = None
                         if modo == "alinear" and viewport.active_tool is getattr(self._alinear(), "tool", None):
                             self.panel = "align"     # Alinear, con su propio submenú
+                        elif not self.anclada:
+                            self._esconder_para_orden(viewport)
                         self._sincronizar()
                     QTimer.singleShot(0, elegir)
                     return
@@ -5673,6 +8327,8 @@ class Cadena:
             for modo, r in g["chips"]:
                 if r.contains(p):
                     self.panel = None
+                    self.modo["agrupar"] = modo
+                    self._guardar_ultimas()
                     QTimer.singleShot(0, lambda: self._accion_sel(viewport, "agrupar", modo))
                     return
             return
@@ -5690,16 +8346,23 @@ class Cadena:
         for modo, r in g["chips"]:
             if not r.contains(p):
                 continue
-            self.modo[clave] = modo
-            if clave == "pintar":
-                QTimer.singleShot(0, lambda: self._pintar(viewport, modo))
+            if clave == "seleccionar" and modo in SEL_EXTRA:
+                # Interruptor: encender o apagar; solo uno de los dos a la vez.
+                self.sel_extra = None if self.sel_extra == modo else modo
+                viewport.flash_status(_tr({"múltiple": "Selección múltiple: cada clic o ventana añade.",
+                                           "quitar": "Deselección múltiple: cada clic o ventana quita."}
+                                          [modo]) if self.sel_extra else
+                                      _tr("Selección normal."), 3000)
+                self._sincronizar()
                 return
-            if clave == "rect" and modo in ("esquina", "centro"):
-                self.bases["rect"]._set_from_center(viewport, modo == "centro")
-            if clave == self.base:
-                # Cambiar de modo puede cambiar de herramienta (rect. girado,
-                # guía): se activa diferido, como al elegir un botón.
-                QTimer.singleShot(0, lambda: self._activar_base(viewport))
+            # La elegida pasa al botón (y se recuerda) y la que tenía, al
+            # subrosco; se lanza ya, como un clic en el botón.
+            self.modo[clave] = modo
+            self._guardar_ultimas()
+            self.panel = None
+            if clave == "seleccionar":
+                viewport.flash_status(_tr(MSG.get(("seleccionar", modo), "")), 4000)
+            QTimer.singleShot(0, lambda: self._lanzar(viewport, clave))
             return
 
     # -- el lazo de selección --
@@ -5745,19 +8408,21 @@ class Cadena:
                     continue
                 if esquinas and all(dentro(w2p(q)) for q in esquinas):
                     elegidos.append(g)
-        scene.select(elegidos, mode=_seleccion.modo_lazo(self._lazo_mods))
+        modo = {"múltiple": "add", "quitar": "remove"}.get(self.sel_extra) \
+            or _seleccion.modo_lazo(self._lazo_mods)
+        scene.select(elegidos, mode=modo)
         viewport.flash_status(_tr("Lazo: {0} elemento(s).", len(elegidos)), 2500)
 
-    # -- enlace con la barra de modificar (sus herramientas van en la mitad de abajo) --
-    def _barra_modificar(self):
-        """La barra de modificar (``window._rosco_lt_barra_modificar``), si está."""
-        barras = getattr(self.app.window, "_rosco_lt_barra_modificar", None) or {}
+    # -- enlace con el arco de modificar (sus herramientas van en la mitad de abajo) --
+    def _arco_modificar(self):
+        """La barra del arco de modificar (``window._rosco_arcos``), si está."""
+        barras = getattr(self.app.window, atributo("arcos"), None) or {}
         return next((b for b in barras.values()
                      if callable(getattr(b, "activar", None))), None)
 
     # -- cancelar la orden en marcha (el botoncito junto al cursor) --
     def _en_marcha(self, viewport) -> bool:
-        """Una orden a medias: una base de la barra de dibujo con su primer punto puesto,
+        """Una orden a medias: una base del anillo con su primer punto puesto,
         Empujar/Tirar arrastrando o cualquier otra herramienta con su punto
         base, su tirador o su arrastre en curso (nunca Seleccionar)."""
         tool = viewport.active_tool
@@ -5784,6 +8449,38 @@ class Cadena:
         tool = viewport.active_tool
         return (tool is not None and tool is not self._select_nativo()
                 and tool is not self.bases["seleccionar"] and tool is not self.espera)
+
+    def _salir_cierra(self, viewport, p) -> bool:
+        """Sin orden elegida (el rosco llamado en vacío o con la selección),
+        al sacar el ratón del rosco este se cierra, como con Esc, en vez de
+        seguir al ratón (2.50.1). Anclado o con una orden, como siempre."""
+        return (self.fijo and self.ancla is not None and not self.anclada
+                and self.win is not None and self.win.isVisible()
+                and not self._submenu_centrado() and not self._rueda_abierta()
+                and not self._cancelable(viewport) and not self._zona_cierre(p))
+
+    def _zona_cierre(self, p) -> bool:
+        """Rosco 1.2.0: la zona de la que salir cierra el rosco, ceñida a
+        él: el círculo que abarca los botoncitos y los ojos, bajando en línea
+        recta hasta los extremos de la capa y el Navegador (la envolvente de
+        los dos). Con un panel abierto vale también la zona de antes."""
+        if self.ancla is None or p is None:
+            return False
+        if self._es_pegado() or self.panel is not None:
+            if self._zona_quieta(p):
+                return True
+        c = self.ancla
+        r = max(self._r_ext() + 2.0 * CHICO_R + 12.0, self._r_ext() + 2.0 * OJO_R + 12.0)
+        puntos = [(c.x() + r * math.cos(2.0 * math.pi * k / 48.0),
+                   c.y() + r * math.sin(2.0 * math.pi * k / 48.0)) for k in range(48)]
+        if self._cajetines_visibles():
+            for rect in (self._rect_capa(c), self._rect_nav(c)):
+                if rect.isEmpty():
+                    continue
+                rect = rect.adjusted(-8.0, -8.0, 8.0, 8.0)
+                puntos += [(rect.left(), rect.top()), (rect.right(), rect.top()),
+                           (rect.right(), rect.bottom()), (rect.left(), rect.bottom())]
+        return _envolvente(puntos).containsPoint(QPointF(p), Qt.OddEvenFill)
 
     def _sobre_la_barra(self, p) -> bool:
         """El ratón está eligiendo en la barra fija (o en su submenú): el
@@ -5870,7 +8567,7 @@ class Cadena:
             return
         fn = getattr(tool, "on_cancel", None)
         if callable(fn):
-            # El Esc de las herramientas de la barra de dibujo, sin nada en curso, apaga el
+            # El Esc de las herramientas del anillo, sin nada en curso, apaga el
             # selector; aquí no: solo se cancela la orden.
             self._cancelando = True
             try:
@@ -5899,9 +8596,9 @@ class Cadena:
             return
         self.arco_visible = not self.arco_visible
         self._soltar()
-        viewport.flash_status(_tr("Rosco LT: selector visible (Esc o clic derecho en vacío lo oculta)."
+        viewport.flash_status(_tr("Rosco: selector visible (Esc o clic derecho en vacío lo oculta)."
                               if self.arco_visible else
-                              "Rosco LT: selector oculto (Esc o clic derecho en vacío lo muestra)."), 3000)
+                              "Rosco: selector oculto (Esc o clic derecho en vacío lo muestra)."), 3000)
         self._sincronizar()
 
     # -- dibujo --
@@ -5953,14 +8650,24 @@ class Cadena:
         return "Radio"
 
     def _texto_icono(self, clave) -> str:
+        if isinstance(clave, str) and clave.startswith("opc:") and self._despliegue is not None:
+            opciones = self._opciones_anillo(self._despliegue)
+            idx = int(clave[4:])
+            if 0 <= idx < len(opciones):
+                tipo, _v, texto, _i, _a = opciones[idx]
+                texto = _tr(texto).replace("\n", " ")
+                return _tr("Al terminar: {0}", texto) if tipo == "fin" else texto
+        if isinstance(clave, str) and clave.startswith("juego:"):
+            return self.huecos.nombre_visible(int(clave[6:]))
         if clave in ("chincheta", "cerrar", "limpia"):
             return texto_chincheta(clave, self.anclada)
-        if clave == "capa":
-            return ("Pasar la selección a otra capa" if self._es_sel
-                    else "Capa donde va lo que dibujas")
+        if clave in TEXTOS_CAPA:
+            if clave == "capa_aplicar":
+                return TEXTOS_CAPA[clave][1 if self.aplicar_capa else 0]
+            return TEXTOS_CAPA[clave]
         if clave == "nav":
             return "Navegador: grupos y componentes del modelo"
-        if clave in _seleccion.SEMI and self._barra_modificar() is None:
+        if clave in _seleccion.SEMI and self._arco_modificar() is None:
             return _tr("{0} (falta la barra de modificar)", _tr(NOMBRES[clave].split(':')[0]))
         if clave in NOMBRES_CHICOS:
             return NOMBRES_CHICOS[clave]
@@ -5986,22 +8693,24 @@ class Cadena:
         vp = self.app.viewport
         T = self.tema
         _flotante.fijar_centro(painter, c, T.abajo_anillo)   # el degradado del tema N
-        # La herramienta de la barra de dibujo se marca solo mientras es la activa.
+        # La herramienta del anillo se marca solo mientras es la activa.
         base = self.base if self._es_base(vp.active_tool) else None
         semi = self._semi_activa(vp)
-        # Lo que se marca en cualquier banda: la herramienta activa (de la barra de dibujo,
-        # Pintar o una de la barra de modificar) y el botón con el submenú abierto.
-        encendidas = {k for k in (base, semi, self.panel) if k is not None}
+        # Lo que se marca en cualquier banda: la herramienta activa (del anillo,
+        # Pintar o una del arco de modificar) y el botón con el submenú abierto.
+        encendidas = {k for k in (base, semi, self.panel, self._despliegue) if k is not None}
         if self._pintando(vp):
             encendidas.add("pintar")
-        sin_barra_modificar = set(_seleccion.SEMI) if self._barra_modificar() is None else set()
+        sin_arco_modificar = set(_seleccion.SEMI) if self._arco_modificar() is None else set()
         # Con la rueda abierta o el submenú a la derecha (temas A y B) los arcos
         # se esconden.
         bandas = () if self._sin_arcos() else self._bandas()
-        for claves, r_int, r_ext, a0, tam in bandas:
+        for claves, r_int, r_ext, a0, tam, barrido in bandas:
             dibujar_banda(painter, c, r_int, r_ext, claves, activa=encendidas & set(claves),
-                          bajo=bajo, apagadas=sin_barra_modificar & set(claves), para_clic=para_clic,
-                          a0=a0, barrido=T.barrido, tam=tam, relieve=T.relieve)
+                          bajo=bajo, apagadas=sin_arco_modificar & set(claves), para_clic=para_clic,
+                          a0=a0, barrido=barrido, tam=tam, relieve=T.relieve)
+        if bandas and para_clic and self._despliegue is not None:
+            self._pintar_despliegue(painter, c)
         # Los huecos de los lados: cada uno, un trozo de banda suelto.
         for _j, clave, r_int, r_ext, a0, b, tam in self._lados():
             dibujar_banda(painter, c, r_int, r_ext, (clave,), activa=encendidas & {clave},
@@ -6029,24 +8738,231 @@ class Cadena:
         else:
             self._pintar_fondo(painter, c)
         self._pintar_encima(painter, c, self._bajo)
-        if self.panel == "ayuda" and self._ayuda_pagina == 0:
-            self._pintar_anima(painter, c)
+
+    # -- la vista previa del subrosco (al pasar por un botón que lo tiene) --
+    def _tiene_subrosco(self, clave) -> bool:
+        if not isinstance(clave, str) or clave in ("vistas", "historial", *OPCIONES_RUEDA):
+            return False
+        try:
+            return bool(self._opciones(clave))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _geom_previa(self, clave):
+        """El subrosco de ``clave`` con su centro en (0, 0), como se abriría."""
+        from . import _rosco
+        e = self.escala_rosco / 100.0
+        f = self.tema.panel_w / 320.0 * e
+        modos = tuple(OPCIONES_RUEDA[clave]) if clave in OPCIONES_RUEDA else self._opciones(clave)
+        con_lados = clave in LIMITES_LADOS
+        con_final = clave in CONSTRUYEN or clave == "flip"
+        cero = _rosco.geometria(0.0, 0.0, len(modos), con_lados, con_final, f)["centro"]
+        g = _rosco.geometria(-cero.x(), -cero.y(), len(modos), con_lados, con_final, f)
+        g["e"] = e
+        g["chips"] = list(zip(modos, g["chips"]))
+        if con_final:
+            fins = ("copia", "y", "z", "x") if clave == "flip" else FINALES
+            g["finales"] = list(zip(fins, g["finales"]))
+        return g
+
+    def _sitio_previa(self, c, clave):
+        """(g, centro, caja) de la previa, en px del visor: a tamaño real,
+        tocando el botón por fuera (PREVIA_HUECO px hasta el anillo de sus
+        opciones); si se sale del monitor, a la derecha del botón."""
+        from . import _rosco
+        if clave in OPCIONES_RUEDA:
+            return self._sitio_previa_rueda(c, clave)
+        sector = self._sector_de(c, clave)
+        if sector is None:
+            return None
+        g = self._geom_previa(clave)
+        m = g["marco"]
+        e = self.escala_rosco / 100.0
+        f = self.tema.panel_w / 320.0 * e
+        r_sub = _rosco.radios(clave in LIMITES_LADOS, clave in CONSTRUYEN or clave == "flip", f)[1]
+        caja_b = sector.boundingRect()
+        b = caja_b.center()
+        dx, dy = b.x() - c.x(), b.y() - c.y()
+        largo = math.hypot(dx, dy) or 1.0
+        ux, uy = dx / largo, dy / largo
+        sale = max((sector.elementAt(i).x - c.x()) * ux + (sector.elementAt(i).y - c.y()) * uy
+                   for i in range(sector.elementCount()))
+        d = sale + PREVIA_HUECO + r_sub
+        centro = QPointF(c.x() + ux * d, c.y() + uy * d)
+        caja = QRectF(centro.x() + m.left(), centro.y() + m.top(), m.width(), m.height())
+        vp = self.app.viewport
+        arriba = vp.mapToGlobal(caja.topLeft().toPoint())
+        pantalla = QGuiApplication.screenAt(arriba) or QGuiApplication.primaryScreen()
+        monitor = pantalla.availableGeometry()
+        if not monitor.contains(QRect(arriba, caja.size().toSize())):
+            centro = QPointF(caja_b.right() + PREVIA_HUECO + r_sub, b.y())
+            caja = QRectF(centro.x() + m.left(), centro.y() + m.top(), m.width(), m.height())
+        return g, centro, caja
+
+    def _sitio_previa_rueda(self, c, clave):
+        """La previa de un subrosco de la rueda (Sección): por fuera de la
+        rueda, en la dirección del gajo bajo el ratón."""
+        from . import _rosco
+        g = self._geom_previa(clave)
+        m = g["marco"]
+        f = self.tema.panel_w / 320.0 * (self.escala_rosco / 100.0)
+        r_sub = _rosco.radios(False, False, f)[1]
+        dc = self._diana_centro(c)
+        p = getattr(self, "_raton_previa", None) or dc
+        dx, dy = p.x() - dc.x(), p.y() - dc.y()
+        largo = math.hypot(dx, dy) or 1.0
+        d = _diana.RUEDA_R + 14.0 + PREVIA_HUECO + r_sub
+        centro = QPointF(dc.x() + dx / largo * d, dc.y() + dy / largo * d)
+        caja = QRectF(centro.x() + m.left(), centro.y() + m.top(), m.width(), m.height())
+        return g, centro, caja
+
+    def _mirar_previa(self, p) -> None:
+        """Rosco: parado un momento sobre un botón con opciones, salen en
+        su anillo; siguen mientras el ratón esté en él o en ellas."""
+        bajo = self._bajo
+        if (isinstance(bajo, str) and bajo.startswith("opc:")) or (
+                self._despliegue is not None and bajo == self._despliegue):
+            self._parar_cierre()
+            if self._reloj_previa is not None:
+                self._reloj_previa.stop()
+            self._previa = None
+            return
+        if self._despliegue is not None:
+            self._programar_cierre()
+        # 3.1.1: la cámara de la rueda abre sus órdenes al pasar por ella siempre.
+        nuevo = bajo if ((_seleccion.opcion("vista_previa") or bajo == "camara") and self.ancla is not None
+                         and (not self._sin_arcos() or bajo in ("seccion", "camara"))
+                         and self._tiene_despliegue(bajo)) else None
+        if nuevo == self._previa:
+            return
+        self._previa = nuevo
+        if self._reloj_previa is None:
+            self._reloj_previa = QTimer(self.app.window)
+            self._reloj_previa.setSingleShot(True)
+            self._reloj_previa.setInterval(DESPLIEGUE_MS)
+            self._reloj_previa.timeout.connect(self._mostrar_previa)
+        if nuevo is None:
+            self._reloj_previa.stop()
+        else:
+            self._reloj_previa.start()
+
+    def _mirar_previa_antes(self, p) -> None:
+        """Parado un momento sobre un botón con subrosco, su vista previa;
+        al irse de él (también hacia un botón tapado por ella), desaparece.
+        En la rueda, sobre Plano de sección, la de su subrosco."""
+        pegado = self._es_pegado()
+        if pegado and self._en_pegado(p):
+            self._parar_cierre()             # sobre el subrosco pegado: sigue
+            if self._previa not in (None, self.panel):
+                self._ocultar_previa()
+            return
+        nuevo = None
+        if (_seleccion.opcion("vista_previa") and (self.panel is None or pegado) and self.submenus_radiales
+                and self.ancla is not None and not self._sin_arcos()
+                and self._tiene_subrosco(self._bajo)):
+            nuevo = self._bajo
+        elif (_seleccion.opcion("vista_previa") and self._rueda_abierta() and self.ancla is not None
+              and self._bajo == "seccion"):
+            nuevo = "seccion_sub"
+            self._raton_previa = QPointF(p)
+        if pegado:
+            if nuevo == self.panel:          # de vuelta en su botón
+                self._parar_cierre()
+                if self._previa not in (None, self.panel):
+                    self._ocultar_previa()
+                self._previa = self.panel
+                return
+            self._programar_cierre()
+        if nuevo == self._previa:
+            return
+        self._ocultar_previa()
+        self._previa = nuevo
+        if nuevo is None or not _edicion.con("previa"):
+            return
+        if self._reloj_previa is None:
+            from ._previa import ESPERA_MS
+            self._reloj_previa = QTimer(self.app.window)
+            self._reloj_previa.setSingleShot(True)
+            self._reloj_previa.setInterval(ESPERA_MS)
+            self._reloj_previa.timeout.connect(self._mostrar_previa)
+        self._reloj_previa.start()
+
+    def _mostrar_previa(self) -> None:
+        clave = self._previa
+        if clave is None or self._bajo != clave or self.ancla is None:
+            return
+        if self.win is None or not self.win.isVisible():
+            return
+        if self.panel is not None and not (clave in ("seccion", "camara") and self._rueda_abierta()):
+            return
+        self._abrir_despliegue(clave)
+
+    def _mostrar_previa_antes(self) -> None:
+        clave = self._previa
+        if clave == "seccion_sub":
+            if self._bajo != "seccion" or not self._rueda_abierta():
+                return
+        elif clave is None or self._bajo != clave or (self.panel is not None and not self._es_pegado()):
+            return
+        if self.ancla is None or self.win is None or not self.win.isVisible():
+            return
+        if clave not in ("seccion_sub", "flip") and self.submenus_radiales:
+            self._abrir_pegado(clave)        # 2.50.0: el subrosco de verdad, pegado al botón
+            return
+        if self._es_pegado():
+            self._cerrar_pegado()
+        if not _edicion.con("previa"):
+            return
+        try:
+            from ._previa import VentanaPrevia, en_gris
+            g, centro, caja = self._sitio_previa(self.ancla, clave)
+            m = g["marco"]
+            dpr = 1.0                        # con escala, la sombra de los gajos se descoloca
+            img = QImage(int((m.width() + 4) * dpr), int((m.height() + 4) * dpr),
+                         QImage.Format_ARGB32_Premultiplied)
+            img.setDevicePixelRatio(dpr)
+            img.fill(Qt.transparent)
+            p = QPainter(img)
+            try:
+                p.setRenderHint(QPainter.Antialiasing)
+                p.translate(-m.left() + 2.0, -m.top() + 2.0)
+                self._pintar_rosco(p, g, clave)
+            finally:
+                p.end()
+            gris = en_gris(img)
+            gris.setDevicePixelRatio(dpr)
+            if self._ventana_previa is None:
+                self._ventana_previa = VentanaPrevia(self.app.window)
+            arriba = self.app.viewport.mapToGlobal(QPoint(round(caja.left() - 2.0), round(caja.top() - 2.0)))
+            self._ventana_previa.mostrar(gris, arriba)
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo enseñar la vista previa de %s", clave)
+
+    def _ocultar_previa(self) -> None:
+        self._previa = None                  # al volver a pararse sobre el botón, sale otra vez
+        if self._reloj_previa is not None:
+            self._reloj_previa.stop()
+        if self._ventana_previa is not None:
+            self._ventana_previa.ocultar()
 
     def _estado_fondo(self) -> tuple:
         """Todo lo que cambia el dibujo de la barra fija, salvo dónde está y
         qué hay bajo el ratón."""
         vp = self.app.viewport
-        return (_idioma.actual(), self._ayuda_pagina, self.tema.clave, self.escala, self._es_sel, self.anclada, self.diana.proyeccion_actual(),
+        return (_idioma.actual(), self.tema.clave, self.escala, self._es_sel, self.anclada, self.diana.proyeccion_actual(),
                 self.diana._en_vista(vp, "bottom") if self.tema.rueda else None,
-                self._texto_capa(), self.pos_capa,
+                self._estado_capa(), self.pos_capa,
                 self._texto_props() if self._es_sel else None, self.panel,
                 self.base, self._es_base(vp.active_tool), self._pintando(vp),
-                self._historial_v, self.aplicar_capa,
+                self._historial_v, self.aplicar_capa, self._fly, self._fly_bajo, self.sel_extra,
+                getattr(self, "_gotero", False),
+                tuple(_subsub.cara(*k) for k in _subsub.SUBSUB),
                 tuple(sorted(self.modo.items())),
                 self.pedir_nombre, int(getattr(self.bases["poly"], "sides", 0) or 0),
                 int(getattr(self.bases["circle"], "sides", 0) or 0), self._estado_semi(vp),
-                self._barra_modificar() is None, round(float(self.win.devicePixelRatioF()), 2),
-                self.submenus_radiales, self._sitio_submenu(), self._estado_simetria())
+                self._arco_modificar() is None, round(float(self.win.devicePixelRatioF()), 2),
+                self.submenus_radiales, self._sitio_submenu(), self._estado_simetria(),
+                self._despliegue, tuple(sorted((k, v) for k, v in self.modo.items() if k in UNIDOS)))
 
     def _estado_simetria(self) -> tuple | None:
         """Lo que se marca en el submenú de la Simetría (si no, el dibujo
@@ -6117,11 +9033,13 @@ class Cadena:
                              self._r_ojo_centrado())
             self._pintar_props(painter, c, False)
             self._dibujar_panel(painter, c)
+            self._pintar_subsub(painter, c)
             return
         self._pintar_banda(painter, c, None, para_clic=True)
         self._pintar_capa(painter, c, False)
         if not T.cajetines_plegados:
             self._pintar_nav(painter, c, False)
+        self._pintar_puntos(painter, c)
         if self._con_props():
             self._pintar_props(painter, c, False)
         if not T.rueda:
@@ -6142,6 +9060,123 @@ class Cadena:
         elif self._es_sel:
             self._pintar_menus_sel(painter, c)
         self._dibujar_panel(painter, c)
+        self._pintar_subsub(painter, c)
+
+    # -- sub-submenús (``_subsub``) --
+    def _fly_formas(self, g=None) -> list:
+        """[(orden, forma)] del sub-submenú abierto (vacío si no hay)."""
+        if self._fly is None or self.panel is None:
+            return []
+        g = g if g is not None else self._panel()
+        if g is None:
+            return []
+        try:
+            return _subsub.geometria(g, self.panel, self._fly)
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo situar el sub-submenú")
+            return []
+
+    @staticmethod
+    def _caja_de(forma) -> QRectF:
+        return forma.path.boundingRect() if hasattr(forma, "path") else QRectF(forma)
+
+    def _mirar_fly(self, p) -> bool:
+        """El sub-submenú sale solo al pasar por su botón y sigue abierto
+        mientras el ratón va hacia él o está en él. True = cambió."""
+        antes = (self._fly, self._fly_bajo)
+        nuevo, bajo = None, None
+        g = self._panel() if self.panel is not None else None
+        if g is not None and p is not None and g.get("chips"):
+            chips = dict(g["chips"])
+            sobre = next((k for k, r in g["chips"] if r.contains(p)), None)
+            if sobre is not None and _subsub.tiene(self.panel, sobre):
+                nuevo = sobre
+            elif self._fly is not None and self._fly in chips:
+                formas = self._fly_formas(g)
+                bajo = next((o for o, forma in formas if forma.contains(p)), None)
+                if bajo is not None:
+                    nuevo = self._fly
+                elif sobre is None and formas:
+                    caja = self._caja_de(chips[self._fly])
+                    for _o, forma in formas:
+                        caja = caja.united(self._caja_de(forma))
+                    if caja.adjusted(-4.0, -4.0, 4.0, 4.0).contains(p):
+                        nuevo = self._fly          # de camino del botón a su sub-submenú
+        self._fly, self._fly_bajo = nuevo, bajo
+        return (self._fly, self._fly_bajo) != antes
+
+    def _pintar_subsub(self, painter, c) -> None:
+        """Las marcas ▸ de los botones con sub-submenú y, si está abierto, el
+        sub-submenú (sus gajos por fuera del rosco)."""
+        clave = self.panel
+        if clave is None or not any(k[0] == clave for k in _subsub.SUBSUB):
+            return
+        g = self._panel(c)
+        if g is None or not g.get("chips"):
+            return
+        from . import _rosco
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+            for q, a in _subsub.marca(g, clave):
+                ar = math.radians(a)
+                ux, uy = math.cos(ar), -math.sin(ar)
+                nx, ny = -uy, ux
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(ROJO))
+                painter.drawPolygon(QPolygonF([QPointF(q.x() + ux * 4.0, q.y() + uy * 4.0),
+                                               QPointF(q.x() - ux * 2.0 + nx * 4.0, q.y() - uy * 2.0 + ny * 4.0),
+                                               QPointF(q.x() - ux * 2.0 - nx * 4.0, q.y() - uy * 2.0 - ny * 4.0)]))
+            formas = self._fly_formas(g) if self._fly is not None else []
+            e = g.get("e", 1.0)
+            f = QFont(painter.font())
+            f.setPointSizeF(8.0 * e)
+            f.setBold(False)
+            painter.setFont(f)
+            for orden, forma in formas:
+                if hasattr(forma, "path"):
+                    _rosco._gajo(painter, forma, _subsub.texto(orden), orden == self._fly_bajo, None,
+                                 _subsub.icono(orden), self.tema.relieve, e)
+                else:
+                    painter.setPen(QPen(ROJO if orden == self._fly_bajo else QColor(180, 178, 169), 1.2))
+                    painter.setBrush(QBrush(QColor(252, 222, 222) if orden == self._fly_bajo
+                                            else QColor(255, 255, 255, 235)))
+                    painter.drawRoundedRect(forma, 5.0, 5.0)
+                    painter.setPen(TINTA)
+                    painter.drawText(forma, Qt.AlignCenter, _tr(_subsub.texto(orden).replace("\n", " ")))
+        finally:
+            painter.restore()
+
+    def _elegir_subsub(self, viewport, hueco, orden, clave=None) -> None:
+        """Una orden del sub-submenú: pasa al botón (la de antes, al
+        sub-submenú) y se usa ya."""
+        clave = clave or self.panel
+        if clave is None:
+            return
+        _subsub.poner_cara(clave, hueco, orden)
+        self._fly, self._fly_bajo = None, None
+        barra = self._arco_modificar()
+        self.panel = None
+        if clave in _seleccion.SEMI and barra is not None:
+            if self._semi_activa(viewport) != clave:
+                barra.modo[clave] = hueco
+                self._accion_semi(viewport, clave)
+            else:
+                barra.elegir_modo(clave, hueco)
+            self._esconder_para_orden(viewport)
+        else:
+            self.modo[clave] = hueco
+            self._guardar_ultimas()
+            # Misma orden con otra cara (anotar ↔ borrar): se vuelve a activar.
+            if viewport.active_tool is self._tool_de(clave):
+                self._seleccionar_nativo_un_momento(viewport)
+            self._lanzar(viewport, clave)
+        self._sincronizar()
+
+    def _seleccionar_nativo_un_momento(self, viewport) -> None:
+        sel = self._select_nativo()
+        if sel is not None:
+            viewport.set_active_tool(sel)
 
     # -- los temas (maquetaciones del anillo) --
     def poner_tema(self, clave: str) -> None:
@@ -6149,7 +9184,7 @@ class Cadena:
         self.tema = _temas.escalar(_temas.tema(clave), self.escala)
         _temas.guardar(self.tema.clave)
         self._rehacer_dibujo()
-        self.app.viewport.flash_status(_tr("Rosco LT: tema «{0}».", self.tema.nombre), 3000)
+        self.app.viewport.flash_status(_tr("Rosco: tema «{0}».", self.tema.nombre), 3000)
         self._sincronizar()
 
     def poner_escala(self, factor: float) -> None:
@@ -6182,11 +9217,14 @@ class Cadena:
 
     def _rehacer_dibujo(self) -> None:
         """Tras cambiar de tema o de tamaño: nada guardado vale."""
+        self._olvidar_dibujo()
+        self._soltar()
+
+    def _olvidar_dibujo(self) -> None:
         self._fondo = None
         self._cursor = None
         if self.win is not None:
             self.win._mascara_clave = None
-        self._soltar()
 
     def previsualizar(self, clave: str, escala: float = 0.5) -> QPixmap:
         """Una imagen de la barra fija con el tema ``clave`` (la vista previa
@@ -6194,6 +9232,7 @@ class Cadena:
         coordenadas de la ventanita, recortada a lo que ocupa."""
         guardado = (self.tema, self.panel, self._bajo, self._fondo)
         self.tema, self.panel, self._bajo = _temas.tema(clave), None, None
+        self._previsualizando = True
         try:
             c = QPointF(self.win.ancla_local)
             caja = self._mascara_path(c).boundingRect().adjusted(-16.0, -16.0, 16.0, 16.0)
@@ -6213,6 +9252,7 @@ class Cadena:
             finally:
                 p.end()
         finally:
+            self._previsualizando = False
             self.tema, self._bajo, self._fondo = guardado[0], guardado[2], guardado[3]
             self._panel_abierto = guardado[1]    # sin tocar dónde sale su submenú
         return pm
@@ -6234,7 +9274,9 @@ class Cadena:
         sin_arcos = self._sin_arcos()
         forma = None if sin_arcos else self._sector_de(c, bajo)
         circulo = None if forma is not None or sin_arcos else self._circulo_de(c, bajo)
-        if forma is not None:
+        if bajo in TEXTOS_CAPA:
+            self._tinte_capa(painter, c, bajo, fuerte)
+        elif forma is not None:
             painter.fillPath(forma, QBrush(tinte))
         elif circulo is not None:
             painter.setBrush(QBrush(fuerte))
@@ -6259,7 +9301,8 @@ class Cadena:
                 rect, radio = rects[bajo]
                 painter.drawRoundedRect(rect(c), radio, radio)
         painter.restore()
-        etiqueta(painter, self._texto_icono(bajo), self._pos_etiqueta(c))
+        etiqueta(painter, self._texto_icono(bajo), self._pos_etiqueta(c),
+                 traducir=not str(bajo).startswith("juego:"))
 
     def _dibujar_panel(self, painter, c=None) -> None:
         g = self._panel(c)
@@ -6273,6 +9316,8 @@ class Cadena:
             _flotante.fijar_centro(painter, self._diana_centro(cc_panel), self.tema.abajo_anillo)
             _diana.rueda_pintar(painter, self._diana_centro(cc_panel), None,
                                 self.diana.proyeccion_actual(), self.diana._en_vista(vp, "bottom"))
+            if self._despliegue in ("seccion", "camara"):
+                self._pintar_desp_rueda(painter, self._diana_centro(cc_panel))
             return
         if g.get("radial"):
             self._pintar_rosco(painter, g, clave)
@@ -6282,8 +9327,7 @@ class Cadena:
         f.setBold(False)
         painter.setFont(f)
         painter.setPen(Qt.NoPen)
-        # La ayuda es opaca: es mucho texto y tapa las pastillas de debajo.
-        painter.setBrush(QBrush(QColor(255, 255, 255, 255 if clave == "ayuda" else 215)))
+        painter.setBrush(QBrush(QColor(255, 255, 255, 215)))
         painter.drawRoundedRect(g["marco"], 7.0, 7.0)
         for color, ancho in ((HALO, 3.4), (ROJO, 1.6)):
             painter.setPen(QPen(color, ancho))
@@ -6341,7 +9385,7 @@ class Cadena:
                 painter.drawText(r, Qt.AlignCenter, _tr(texto))
 
         if clave == "ayuda":
-            self._pintar_ayuda(painter, g)   # la del ojo verde
+            self._pintar_ayuda_rapida(painter, g, f)
             return
         if clave == "historial":
             # La columna del ojo amarillo: lo último usado, arriba.
@@ -6397,11 +9441,17 @@ class Cadena:
                 boton(r, TEXTO_ALINEAR[k], self._marcado_alinear(k), None, ICONO_ALINEAR.get(k))
             return
         actual = self.modo.get(clave)          # Agrupar: acciones, ninguna marcada
-        if clave in _seleccion.SEMI and self._barra_modificar() is not None:
-            actual = self._barra_modificar().modo.get(clave)
+        if clave in _seleccion.SEMI and self._arco_modificar() is not None:
+            actual = self._arco_modificar().modo.get(clave)
         for modo, r in g["chips"]:
-            boton(r, modo, modo == actual,
-                  COLOR_GRUPO.get(modo) if clave == "grupo" else None,
+            if _subsub.tiene(clave, modo):
+                cara = _subsub.cara(clave, modo)
+                boton(r, _subsub.texto(cara).replace("\n", " "), modo == actual, None, _subsub.icono(cara))
+                continue
+            boton(r, TEXTO_MODO.get((clave, modo), modo).replace("\n", " "),
+                  modo == actual or (clave == "seleccionar" and modo == self.sel_extra),
+                  COLOR_GRUPO.get(modo) if clave == "grupo"
+                  else (COLOR_SEL_EXTRA.get(modo) if clave == "seleccionar" else None),
                   ICONO_MODO.get((clave, modo)))
         if "finales" in g:
             # Al terminar lo dibujado: nada, grupo, componente o con nombre.
@@ -6414,7 +9464,7 @@ class Cadena:
 
     def _alinear(self):
         """El control de Alinear (o None)."""
-        barra = self._barra_modificar()
+        barra = self._arco_modificar()
         return barra._alinear() if barra is not None else None
 
     def _marcado_alinear(self, k: str) -> bool:
@@ -6436,6 +9486,13 @@ class Cadena:
             _rosco.pintar(painter, g, _tr("Cámara"), modos, [], None, relieve, TINTA,
                           lambda p, q: dibujar_boton_redondo(p, "volver", q, None, relieve=relieve))
             return
+        if clave == "seccion_sub":
+            modos = [(SECCION_OPCIONES[k], self._seccion_marcada(k), QColor(46, 158, 79), SECCION_ICONOS[k])
+                     for k, _r in g["chips"]]
+            relieve = self.tema.relieve
+            _rosco.pintar(painter, g, _tr("Plano de sección"), modos, [], None, relieve, TINTA,
+                          lambda p, q: dibujar_boton_redondo(p, "volver", q, None, relieve=relieve))
+            return
         simetria = getattr(self, "simetria", None)
         if clave == "flip" and simetria is not None:
             modos = [(TEXTO_FLIP_ROSCO[k], simetria.marcado(k), None, ICONO_FLIP.get(k))
@@ -6455,10 +9512,16 @@ class Cadena:
                           lambda p, q: dibujar_boton_redondo(p, "volver", q, None, relieve=relieve))
             return
         actual = self.modo.get(clave)          # Agrupar: acciones, ninguna marcada
-        if clave in _seleccion.SEMI and self._barra_modificar() is not None:
-            actual = self._barra_modificar().modo.get(clave)
-        modos = [(m, m == actual, COLOR_GRUPO.get(m) if clave == "grupo" else None,
-                  ICONO_MODO.get((clave, m))) for m, _r in g["chips"]]
+        if clave in _seleccion.SEMI and self._arco_modificar() is not None:
+            actual = self._arco_modificar().modo.get(clave)
+        extra = self.sel_extra if clave == "seleccionar" else None
+        modos = [(_subsub.texto(_subsub.cara(clave, m)) if _subsub.tiene(clave, m)
+                  else TEXTO_MODO.get((clave, m), m),
+                  m == actual or (extra is not None and m == extra),
+                  COLOR_GRUPO.get(m) if clave == "grupo"
+                  else (COLOR_SEL_EXTRA.get(m) if clave == "seleccionar" else None),
+                  _subsub.icono(_subsub.cara(clave, m)) if _subsub.tiene(clave, m)
+                  else ICONO_MODO.get((clave, m))) for m, _r in g["chips"]]
         fin = self._final_actual() if "finales" in g else None
         finales = [("grupo\ncon nombre" if k == "con nombre" else k, k == fin,
                     COLOR_GRUPO.get(k), ICONO_MODO.get(("fin", k)))
@@ -6630,13 +9693,13 @@ def _ventanita(painter, viewport, pos, titulo, valor, pista, escribiendo) -> Non
 
 
 def _icono_barra(window) -> QIcon:
-    """El botón de la barra «Rosco LT»: la diana roja y blanca con el
+    """El botón de la barra «Rosco»: la diana roja y blanca con el
     arquitecto en negro, con sus colores, sobre la baldosa azul (``_baldosa``);
     si falla, el de siempre."""
     try:
         from . import _baldosa
         cuerpo = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
-                  + _iconos.SVG["barra_dibujo"] + "</svg>")
+                  + _iconos.SVG["anillo"] + "</svg>")
         return _baldosa.icono(lambda px: _baldosa.svg(cuerpo, px), colores=True)
     except Exception:  # noqa: BLE001 — queda el icono de siempre
         log.exception("no se pudo hacer el botón en baldosa")
@@ -6644,14 +9707,14 @@ def _icono_barra(window) -> QIcon:
 
 
 def _icono(window) -> QIcon:
-    """El glifo de caja de ``icons/barra_dibujo.svg``, con sus trazos
+    """El glifo de caja de ``icons/anillo.svg``, con sus trazos
     (``currentColor``) en el color de texto del tema, como los iconos nativos.
     Si el SVG no se puede leer, la misma caja dibujada a mano."""
     tinta = window.palette().windowText().color()
     try:
         # El arquitecto de colores, como en las barras.
         from . import _iconos
-        icono = _iconos.qicono("barra_dibujo")
+        icono = _iconos.qicono("anillo")
         if icono is not None:
             return icono
     except Exception:  # noqa: BLE001 — queda la caja monocroma
@@ -6673,7 +9736,7 @@ def _icono(window) -> QIcon:
                 icono.addPixmap(pm)
             return icono
     except Exception:  # noqa: BLE001 — queda el dibujo a mano
-        log.exception("no se pudo cargar icons/barra_dibujo.svg")
+        log.exception("no se pudo cargar icons/anillo.svg")
     return _icono_a_mano(tinta)
 
 

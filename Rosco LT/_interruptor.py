@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""El interruptor de Rosco LT: apagarla y encenderla sin reiniciar
+"""El interruptor de Rosco: apagarla y encenderla sin reiniciar
 IngeTrazo. Se apaga y se enciende con el botón de encendido del principio de
-la barra «Rosco LT» (hundido y con disco naranja si está encendida; en gris
+la barra «Rosco» (hundido y con disco naranja si está encendida; en gris
 y, apagada, en la barra solo quedan él, Reiniciar y Tareas) o con la casilla Extensiones ▸
-Rosco LT ▸ Rosco LT activado; también se apaga en Opciones ▸ Desactivar
-Rosco LT (el botoncito bajo el anillo).
+Rosco ▸ Rosco activado; también se apaga con el botón Apagar del anillo
+(doble clic, o clic y «Apagar Rosco») y se enciende o se apaga con dos toques
+rápidos en Bloq Mayús (se puede desactivar en Opciones ▸ Órdenes).
 
-También pone el submenú Extensiones ▸ Rosco LT, donde van todas sus
-órdenes (``entrada``): la barra de dibujo, la barra de modificar, Alinear, Reiniciar, las Tareas y la
+También pone el submenú Extensiones ▸ Rosco, donde van todas sus
+órdenes (``entrada``): el anillo, el arco de modificar, Alinear, Reiniciar, las Tareas y la
 casilla. Las Tareas (``_notas``) no se apagan: siguen a mano con ella apagada.
 
 Apagada, las piezas siguen cargadas pero no hacen nada: sus filtros de
@@ -19,28 +20,34 @@ IngeTrazo se cierra con ella apagada, arranca apagada.
 """
 from __future__ import annotations
 
-from ._idioma import _tr
+from ._idioma import con_nombre, _tr
+import ctypes
 import logging
+import time
 
-from PySide6.QtCore import QPointF, QRectF, QSettings, QSize, Qt
+from PySide6.QtCore import QPointF, QRectF, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QAbstractSpinBox, QApplication, QLineEdit, QPlainTextEdit, QTextEdit
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt")
+from ._ajustes import atributo, registro
 
-TITULO_ACTIVAR = "Activar Rosco LT"
-TIP_ACTIVAR = "Vuelve a poner en marcha Rosco LT (la barra, Alinear y Reiniciar)."
-TITULO_CASILLA = "Rosco LT activado"
-TIP_CASILLA = "Enciende o apaga Rosco LT al momento, sin reiniciar IngeTrazo."
-TITULO_BOTON = "Interruptor de Rosco LT"
-TIP_ENCENDIDA = "Rosco LT encendido. Clic para apagarlo (sin reiniciar)."
-TIP_APAGADA = "Rosco LT apagado. Clic para encenderlo."
-AVISO_APAGADA = ("Rosco LT desactivado. Para volver: el interruptor de la barra "
-                 "«Rosco LT» o Extensiones ▸ Rosco LT.")
+log = registro()
+TITULO_ACTIVAR = "Activar Rosco"
+TIP_ACTIVAR = "Vuelve a poner en marcha Rosco (la barra, Alinear y Reiniciar)."
+TITULO_CASILLA = "Rosco activado"
+TIP_CASILLA = "Enciende o apaga Rosco al momento, sin reiniciar IngeTrazo."
+TITULO_BOTON = "Interruptor de Rosco"
+TIP_ENCENDIDA = "Rosco encendido. Clic para apagarlo (sin reiniciar)."
+TIP_APAGADA = "Rosco apagado. Clic para encenderlo."
+AVISO_APAGADA = ("Rosco desactivado. Para volver: el interruptor de la barra "
+                 "«Rosco» o Extensiones ▸ Rosco.")
 ACCENT = "#f37329"
-# El orden de las órdenes en Extensiones ▸ Rosco LT (se cargan en otro).
-ORDEN = ("barra_dibujo", "barra_modificar", "alinear", "reiniciar", "notas_modelo", "notas_global",
+# El orden de las órdenes en Extensiones ▸ Rosco (se cargan en otro).
+ORDEN = ("anillo", "arco_modificar", "alinear", "reiniciar", "notas_modelo", "notas_global",
          "interruptor")
 
+DOBLE_BLOQ_S = 0.4                     # lo que puede pasar entre los dos toques de Bloq Mayús
+VK_BLOQ_MAYUS = 0x14
 # Lo miran los filtros, overlays y envoltorios de todas las piezas.
 ENCENDIDA = True
 
@@ -72,22 +79,22 @@ def _buscar(win, texto: str, excluir=()):
 
 
 def _submenu(app):
-    """Extensiones ▸ Rosco LT (None si esta IngeTrazo no tiene ``add_menu``)."""
+    """Extensiones ▸ Rosco (None si esta IngeTrazo no tiene ``add_menu``)."""
     win = app.window
-    if not hasattr(win, "_rosco_lt_submenu"):
+    if not hasattr(win, atributo("submenu")):
         menu = None
         crear = getattr(app, "add_menu", None)
         if callable(crear):
             try:
-                menu = crear("Rosco LT")
+                menu = crear(con_nombre("Rosco"))
             except Exception:  # noqa: BLE001 — las órdenes van sueltas
-                log.exception("no se pudo crear el submenú Rosco LT")
-        win._rosco_lt_submenu = menu
-    return win._rosco_lt_submenu
+                log.exception("no se pudo crear el submenú Rosco")
+        setattr(win, atributo("submenu"), menu)
+    return getattr(win, atributo("submenu"))
 
 
 def entrada(app, clave: str, texto: str, funcion, tip: str, shortcut=None):
-    """Una orden de Rosco LT en Extensiones ▸ Rosco LT, en su sitio según
+    """Una orden de Rosco en Extensiones ▸ Rosco, en su sitio según
     ``ORDEN``. Sin submenú, suelta en Extensiones (como antes)."""
     menu = _submenu(app)
     if menu is None:
@@ -99,22 +106,23 @@ def entrada(app, clave: str, texto: str, funcion, tip: str, shortcut=None):
     if shortcut:
         accion.setShortcut(QKeySequence(shortcut))
     accion.triggered.connect(lambda _c=False: funcion())
-    accion._rosco_lt_orden = ORDEN.index(clave)
+    setattr(accion, atributo("orden"), ORDEN.index(clave))
     despues = next((a for a in menu.actions()
-                    if getattr(a, "_rosco_lt_orden", -1) > accion._rosco_lt_orden), None)
+                    if getattr(a, atributo("orden"), -1) > getattr(accion, atributo("orden"))), None)
     if despues is None:
-        menu.addAction(_tr(accion))
+        menu.addAction(accion)
     else:
         menu.insertAction(despues, accion)
     return accion
 
 
 def apuntar(app, accion, texto: str) -> None:
-    """Una entrada de menú de Rosco LT, para ocultarla al apagar."""
+    """Una entrada de menú de Rosco, para ocultarla al apagar."""
     win = app.window
-    lista = getattr(win, "_rosco_lt_menu", None)
+    lista = getattr(win, atributo("menu"), None)
     if lista is None:
-        lista = win._rosco_lt_menu = []
+        lista = []
+        setattr(win, atributo("menu"), lista)
     if accion is None:
         accion = _buscar(win, _tr(texto), lista)
     if accion is None:
@@ -124,7 +132,7 @@ def apuntar(app, accion, texto: str) -> None:
 
 
 def apagada(app) -> bool:
-    """Para las órdenes de Rosco LT que lleguen con ella apagada (el menú
+    """Para las órdenes de Rosco que lleguen con ella apagada (el menú
     del botón derecho, un atajo): avisa y dice que no se haga nada."""
     if ENCENDIDA:
         return False
@@ -155,14 +163,15 @@ def _encendido(tinta) -> QPixmap:
 
 
 def _icono_interruptor(win) -> QIcon:
-    """Marcado (encendida), en su baldosa azul; sin marcar, en la gris
+    """Como el botón del arquitecto: la diana roja y blanca con su mira y,
+    en el centro, el símbolo de encendido (``_iconos.SVG["interruptor"]``),
+    en su baldosa azul con sus colores; sin marcar (apagada), en la gris
     (``_baldosa``). Si la baldosa falla, el símbolo de siempre."""
     try:
-        from . import _baldosa
-        negro = _encendido(QColor(0, 0, 0)).toImage()
-        return _baldosa.icono(
-            lambda px: negro.scaled(px, px, Qt.KeepAspectRatio, Qt.SmoothTransformation),
-            off_gris=True)
+        from . import _baldosa, _iconos
+        cuerpo = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+                  + _iconos.SVG["interruptor"] + "</svg>")
+        return _baldosa.icono(lambda px: _baldosa.svg(cuerpo, px), off_gris=True, colores=True)
     except Exception:  # noqa: BLE001 — queda el símbolo de siempre
         log.exception("no se pudo hacer el interruptor en baldosa")
     color = QIcon(_encendido(win.palette().windowText().color()))
@@ -190,9 +199,12 @@ def _esconder(*ventanas) -> None:
 class Interruptor:
     def __init__(self, app) -> None:
         self.app = app
-        self.menu = None                      # la casilla (o «Activar Rosco LT»)
+        self.menu = None                      # la casilla (o «Activar Rosco»)
         self.boton = None                     # el interruptor de la barra
         self.raya = None                      # la raya que lo separa de los demás
+        self.reloj_bloq = None                # vigila Bloq Mayús, también con Rosco apagada
+        self._bloq_abajo = False
+        self._bloq_t = None                   # cuándo fue el último toque de Bloq Mayús
 
     # -- instalación --
     def encendida(self) -> bool:
@@ -216,9 +228,9 @@ class Interruptor:
             self.menu.setCheckable(True)
             self.menu.setToolTip(_tr(TIP_CASILLA))
             self.menu.setStatusTip(_tr(TIP_CASILLA))
-            self.menu._rosco_lt_orden = ORDEN.index("interruptor")
+            setattr(self.menu, atributo("orden"), ORDEN.index("interruptor"))
             self.menu.triggered.connect(self._alternar)
-            submenu.addAction(_tr(self.menu))
+            submenu.addAction(self.menu)
         else:
             accion = app.add_menu_action(_tr(TITULO_ACTIVAR), self.encender, tip=_tr(TIP_ACTIVAR))
             self.menu = accion if accion is not None else _buscar(win, _tr(TITULO_ACTIVAR))
@@ -232,41 +244,76 @@ class Interruptor:
             self.boton.setCheckable(True)
             self.boton.triggered.connect(self._alternar)
             if primera is None:
-                tb.addAction(_tr(self.boton))
+                tb.addAction(self.boton)
                 self.raya = tb.addSeparator()
             else:
                 tb.insertAction(primera, self.boton)
                 self.raya = tb.insertSeparator(primera)
-            tb._rosco_lt_refs.append(self.boton)
+            getattr(tb, atributo("refs")).append(self.boton)
         except Exception:  # noqa: BLE001 — queda el menú
             log.exception("no se pudo poner el interruptor en la barra")
             self.boton = None
         self._ver_acciones(ENCENDIDA)
+        from . import _edicion
+        if getattr(ctypes, "windll", None) is not None and _edicion.con("doble_bloq"):
+            # IngeTrazo no recibe Bloq Mayús como atajo: se mira la propia tecla.
+            self.reloj_bloq = QTimer(win)
+            self.reloj_bloq.setInterval(30)
+            self.reloj_bloq.timeout.connect(self._mirar_bloq)
+            self.reloj_bloq.start()
+
+    def _mirar_bloq(self) -> None:
+        """Cada pulsación de Bloq Mayús, solo con IngeTrazo en primer plano."""
+        abajo = bool(ctypes.windll.user32.GetAsyncKeyState(VK_BLOQ_MAYUS) & 0x8000)
+        if abajo == self._bloq_abajo:
+            return
+        self._bloq_abajo = abajo
+        if abajo and QApplication.applicationState() == Qt.ApplicationActive:
+            self._toque_bloq()
+
+    def _toque_bloq(self) -> None:
+        """Dos toques seguidos en Bloq Mayús encienden o apagan Rosco; escribiendo
+        en una casilla no cuentan."""
+        from . import _seleccion
+        if not _seleccion.opcion("doble_bloq"):
+            return
+        if isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+            self._bloq_t = None
+            return
+        ahora, antes = time.monotonic(), self._bloq_t
+        if antes is None or ahora - antes > DOBLE_BLOQ_S:
+            self._bloq_t = ahora
+            return
+        self._bloq_t = None
+        if ENCENDIDA:
+            self.apagar()
+        else:
+            self.encender()
 
     # -- las piezas --
     def _cadenas(self) -> list:
-        return list((getattr(self.app.window, "_rosco_lt_barra_dibujo", None) or {}).values())
+        return list((getattr(self.app.window, atributo("anillos"), None) or {}).values())
 
-    def _barras_modificar(self) -> list:
-        return list((getattr(self.app.window, "_rosco_lt_barra_modificar", None) or {}).values())
+    def _arcos_modificar(self) -> list:
+        return list((getattr(self.app.window, atributo("arcos"), None) or {}).values())
 
-    def _de_rosco_lt(self, tool) -> bool:
+    def _de_rosco(self, tool) -> bool:
         if tool is None:
             return False
         for c in self._cadenas():
             if c._es_base(tool) or tool is c.push:
                 return True
-        if any(tool is b.referencia for b in self._barras_modificar()):
+        if any(tool is b.referencia for b in self._arcos_modificar()):
             return True
-        alinear = getattr(self.app.window, "_rosco_lt_alinear", None)
+        alinear = getattr(self.app.window, atributo("alinear"), None) or getattr(self.app.window, "_alinear", None)
         return alinear is not None and tool is getattr(alinear, "tool", None)
 
     def _a_seleccionar(self) -> None:
-        """Si la herramienta activa es de Rosco LT, el Seleccionar de
+        """Si la herramienta activa es de Rosco, el Seleccionar de
         IngeTrazo (la orden a medias se cancela, como con Esc)."""
         win, vp = self.app.window, self.app.viewport
         tool = vp.active_tool
-        if not self._de_rosco_lt(tool):
+        if not self._de_rosco(tool):
             return
         cancelar = getattr(tool, "on_cancel", None)
         if callable(cancelar):
@@ -287,16 +334,16 @@ class Interruptor:
 
     def _ver_acciones(self, encendida: bool) -> None:
         """Encendida: sus entradas y botones; apagada, solo el interruptor,
-        la casilla del submenú y los botones marcados ``_rosco_lt_siempre``
+        la casilla del submenú y los botones marcados ``_rosco_siempre``
         (Reiniciar). Las Tareas no están en estas listas: no se tocan."""
         from PySide6.QtWidgets import QToolBar
         from ._barra import TOOLBAR
         win = self.app.window
-        for a in getattr(win, "_rosco_lt_menu", None) or []:
+        for a in getattr(win, atributo("menu"), None) or []:
             a.setVisible(encendida)
         tb = win.findChild(QToolBar, TOOLBAR)
-        for a in getattr(tb, "_rosco_lt_refs", None) or []:
-            if a is not self.boton and not getattr(a, "_rosco_lt_siempre", False):
+        for a in getattr(tb, atributo("refs"), None) or []:
+            if a is not self.boton and not getattr(a, atributo("siempre"), False):
                 a.setVisible(encendida)
         if self.menu is not None:
             if self.menu.isCheckable():          # la casilla del submenú, siempre
@@ -346,8 +393,8 @@ class Interruptor:
                 c._quitar_cursor(vp)
                 c._soltar()
             except Exception:  # noqa: BLE001 — las demás piezas se apagan igual
-                log.exception("no se pudo apagar la barra de dibujo del todo")
-        for b in self._barras_modificar():
+                log.exception("no se pudo apagar el anillo del todo")
+        for b in self._arcos_modificar():
             try:
                 _parar(b._reloj, b._reposo)
                 _esconder(b.win)
@@ -355,12 +402,12 @@ class Interruptor:
                 b._quitar_cursor(vp)
                 b._soltar()
             except Exception:  # noqa: BLE001
-                log.exception("no se pudo apagar la barra de modificar del todo")
+                log.exception("no se pudo apagar el arco de modificar del todo")
         self._ver_acciones(False)
         vp.update()
         if not arranque:
             vp.flash_status(_tr(AVISO_APAGADA), 8000)
-        log.info("Rosco LT desactivado")
+        log.info("Rosco desactivado")
 
     def encender(self) -> None:
         global ENCENDIDA
@@ -381,14 +428,14 @@ class Interruptor:
                     c.crono._tic.start()
                 c._sincronizar()
             except Exception:  # noqa: BLE001
-                log.exception("no se pudo encender la barra de dibujo")
-        for b in self._barras_modificar():
+                log.exception("no se pudo encender el anillo")
+        for b in self._arcos_modificar():
             try:
                 b._reloj.start()
                 b._sincronizar()
             except Exception:  # noqa: BLE001
-                log.exception("no se pudo encender la barra de modificar")
+                log.exception("no se pudo encender el arco de modificar")
         self._ver_acciones(True)
         vp.update()
-        vp.flash_status(_tr("Rosco LT activado."), 4000)
-        log.info("Rosco LT activado")
+        vp.flash_status(_tr("Rosco activado."), 4000)
+        log.info("Rosco activado")

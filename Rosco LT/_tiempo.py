@@ -36,8 +36,9 @@ from PySide6.QtWidgets import (
     QLabel, QPlainTextEdit, QPushButton, QToolButton, QVBoxLayout, QWidget,
 )
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.anillo")
+from ._ajustes import registro
 
+log = registro("anillo")
 ROJO = QColor(214, 34, 34)
 INACTIVO_S = 120.0                      # sin actividad este tiempo: no cuenta
 POSPONER_S = 300.0                      # «Posponer 5 min» del aviso
@@ -179,7 +180,7 @@ class Cronometro(QObject):
 
 # ---- El sonido de la alarma ------------------------------------------------------
 
-# IngeTrazo no trae el módulo de sonido de Qt: se usa el de Windows (winmm),
+# IngeTrazo no trae el módulo de sonido de Qt: se usa el del sistema (winmm),
 # PlaySound para los .wav y MCI para los .mp3.
 _SND_ASYNC, _SND_NODEFAULT, _SND_LOOP, _SND_FILENAME = 0x1, 0x2, 0x8, 0x20000
 _ALIAS = "diana_alarma"
@@ -190,9 +191,9 @@ def _winmm():
     return ctypes.windll.winmm
 
 
-def sonidos_windows() -> list[tuple[str, str]]:
-    """(nombre, ruta) de los sonidos de Windows: alarmas y timbres primero."""
-    carpeta = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Media")
+def sonidos_sistema() -> list[tuple[str, str]]:
+    """(nombre, ruta) de los sonidos del sistema: alarmas y timbres primero."""
+    carpeta = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Media")  # nombre técnico
     try:
         nombres = [n for n in os.listdir(carpeta) if n.lower().endswith(".wav")]
     except OSError:
@@ -206,7 +207,7 @@ def sonidos_windows() -> list[tuple[str, str]]:
 
 
 class Sonido(QObject):
-    """Toca un .wav o .mp3; «» o un archivo que no está: el pitido de Windows."""
+    """Toca un .wav o .mp3; «» o un archivo que no está: el pitido del sistema."""
 
     def __init__(self, padre) -> None:
         super().__init__(padre)
@@ -413,21 +414,21 @@ class PanelTiempo(_Arrastrable, QFrame):
         self.aviso = None
         self.sonido = Sonido(self)
         self._cargando = True
-        self.setObjectName("rosco_lt_tiempo")
+        self.setObjectName("rosco_tiempo")
         self.setStyleSheet(
-            "QFrame#rosco_lt_tiempo { background: #ffffff; "
+            "QFrame#rosco_tiempo { background: #ffffff; "
             "border: 1.5px solid #d62222; border-radius: 8px; }"
-            "QFrame#rosco_lt_tiempo QLabel, QFrame#rosco_lt_tiempo QCheckBox "
+            "QFrame#rosco_tiempo QLabel, QFrame#rosco_tiempo QCheckBox "
             "{ color: #111111; background: transparent; }"
             # Los recercados: borde rosado y el título en rojo.
-            "QFrame#rosco_lt_tiempo QGroupBox { border: 1.2px solid #e6a9a9; border-radius: 7px; "
+            "QFrame#rosco_tiempo QGroupBox { border: 1.2px solid #e6a9a9; border-radius: 7px; "
             "margin-top: 8px; padding: 7px 4px 3px 4px; color: #d62222; font-weight: bold; }"
-            "QFrame#rosco_lt_tiempo QGroupBox::title { subcontrol-origin: margin; left: 8px; "
+            "QFrame#rosco_tiempo QGroupBox::title { subcontrol-origin: margin; left: 8px; "
             "padding: 0 3px; }"
-            "QFrame#rosco_lt_tiempo QGroupBox QWidget { font-weight: normal; }"
+            "QFrame#rosco_tiempo QGroupBox QWidget { font-weight: normal; }"
             # Con dos # para ganar a las reglas de arriba.
-            "QFrame#rosco_lt_tiempo QLabel#cifra { font-size: 15pt; font-weight: bold; color: #111; }"
-            "QFrame#rosco_lt_tiempo QLabel#rotulo { color: #5f5e5a; }"
+            "QFrame#rosco_tiempo QLabel#cifra { font-size: 15pt; font-weight: bold; color: #111; }"
+            "QFrame#rosco_tiempo QLabel#rotulo { color: #5f5e5a; }"
             "QPlainTextEdit, QComboBox { background: #fff; color: #111; border: 1px solid #cfccc5; "
             "border-radius: 4px; padding: 2px 5px; }"
             "QComboBox QAbstractItemView { background: #fff; color: #111; "
@@ -497,8 +498,8 @@ class PanelTiempo(_Arrastrable, QFrame):
         caja, sub = self._recuadro(lay, "Sonido de la alarma")
         fila = QHBoxLayout()
         self.lista = QComboBox()
-        self.lista.addItem(_tr("Pitido de Windows"), "")
-        for nombre, ruta in sonidos_windows():
+        self.lista.addItem(_tr("Pitido del sistema"), "")
+        for nombre, ruta in sonidos_sistema():
             self.lista.addItem(nombre, ruta)
         fila.addWidget(self.lista, 1)
         probar = QPushButton("▶")

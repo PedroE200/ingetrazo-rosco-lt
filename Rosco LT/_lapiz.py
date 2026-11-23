@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""El cursor de Rosco LT: un lápiz amarillo con la forma de la herramienta
+"""El cursor de Rosco: un lápiz amarillo con la forma de la herramienta
 junto a la punta (rectángulo, polígono, arco, círculo, línea, seleccionar,
 medir, altura). Borrar no lleva lápiz sino una goma. La punta es el punto
 activo del cursor.
 
 Contorno negro grueso y halo blanco: se lee sobre cualquier fondo. Sin
-píxeles semitransparentes (en Windows saldrían oscuros).
+píxeles semitransparentes (en el sistema saldrían oscuros).
 """
 from __future__ import annotations
 
@@ -134,6 +134,20 @@ def _forma(p: QPainter, forma: str) -> None:
                 t0, t1 = k / 3.0, k / 3.0 + 0.2
                 trazo.moveTo(x0 + (x1 - x0) * t0, y0 + (y1 - y0) * t0)
                 trazo.lineTo(x0 + (x1 - x0) * t1, y0 + (y1 - y0) * t1)
+    elif forma == "sel_mas":
+        # Seleccionar (2.48.5): «+» y «−», cada clic suma o quita.
+        trazo.moveTo(2, 9)
+        trazo.lineTo(12, 9)
+        trazo.moveTo(7, 4)
+        trazo.lineTo(7, 14)
+        trazo.moveTo(10, 19)
+        trazo.lineTo(20, 19)
+    elif forma == "lazo":
+        # Seleccionar con lazo: un lazo junto a la punta.
+        trazo.moveTo(4, 18)
+        trazo.cubicTo(-4, 10, 4, 2, 13, 4)
+        trazo.cubicTo(24, 7, 22, 18, 12, 18)
+        trazo.cubicTo(7, 18, 6, 21, 9, 24)
     elif forma == "medir":
         trazo.moveTo(2, 18)
         trazo.lineTo(20, 18)
@@ -188,4 +202,54 @@ def cursor(forma: str, dpr: float = 1.0) -> QCursor:
     cur = _CACHE.get(clave)
     if cur is None:
         cur = _CACHE[clave] = QCursor(pixmap(forma, dpr), int(PUNTA.x()), int(PUNTA.y()))
+    return cur
+
+
+# ---- Empujar/tirar: la caja con la flechita hacia fuera de la cara (2.49.0) ----
+LADO_EMPUJE = 44
+_CACHE_EMPUJE: dict = {}
+
+
+def cursor_empuje(angulo: float, dpr: float = 1.0, ejes=None) -> QCursor:
+    """La caja de Empujar con la flecha girada ``angulo`` grados (0 = arriba,
+    en el sentido de las agujas del reloj): la dirección en pantalla de la
+    normal de la cara bajo el ratón. El punto activo, en la caja.
+    ``ejes`` ((ux, uy), (vx, vy)), px: los dos lados de la cara vistos en
+    pantalla, para dibujar la caja paralela a ella (1.11.2); sin ellos,
+    la caja tumbada de siempre."""
+    paso = int(round(angulo / 10.0)) * 10 % 360       # de 10 en 10 grados
+    clave = (paso, round(dpr, 2), ejes)
+    cur = _CACHE_EMPUJE.get(clave)
+    if cur is not None:
+        return cur
+    lado = LADO_EMPUJE
+    pm = QPixmap(int(lado * dpr), int(lado * dpr))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    try:
+        p.setRenderHint(QPainter.Antialiasing)
+        c = QPointF(lado / 2.0, lado / 2.0)
+        if ejes is not None:
+            (ux, uy), (vx, vy) = ejes
+            u, v = QPointF(ux, uy), QPointF(vx, vy)
+            caja = QPolygonF([c + u + v, c + u - v, c - u - v, c - u + v])
+        else:
+            caja = QPolygonF([QPointF(c.x() - 9, c.y() + 3), QPointF(c.x(), c.y() + 8),
+                              QPointF(c.x() + 9, c.y() + 3), QPointF(c.x(), c.y() - 2)])
+        p.setPen(QPen(BLANCO, 4.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawPolygon(caja)
+        p.setPen(QPen(NEGRO, 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(QBrush(QColor(221, 227, 239)))
+        p.drawPolygon(caja)
+        p.translate(c)
+        p.rotate(paso)
+        punta = [QPointF(-5.5, -12.0), QPointF(0.0, -18.0), QPointF(5.5, -12.0)]
+        for color, ancho in ((BLANCO, 6.0), (ROJO, 3.0)):
+            p.setPen(QPen(color, ancho, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawLine(QPointF(0.0, 0.0), QPointF(0.0, -17.0))
+            p.drawPolyline(QPolygonF(punta))
+    finally:
+        p.end()
+    cur = _CACHE_EMPUJE[clave] = QCursor(pm, int(lado / 2), int(lado / 2))
     return cur

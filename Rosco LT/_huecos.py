@@ -7,20 +7,24 @@ ojos.
 Cada hueco guarda una clave: la de un botón propio de la barra («rect»,
 «deshacer», «ocultar_uno»…), ``EXTERNO`` + la clave de un comando de
 el gestor de barras (menús, barras, extensiones, comandos personales) o «» si
-está vacío. Los ojos, además, pueden llevar «rueda», «historial» o
-«ayuda» (se abren al pasar el ratón). Se guarda en los ajustes
+está vacío. Los ojos, además, pueden llevar «rueda» o «historial»
+(se abren al pasar el ratón) o «texturas» (con un clic). Se guarda en los ajustes
 (``_ajustes``) → «huecos/config» (JSON); «Por defecto» vuelve a la barra de
 siempre."""
 from __future__ import annotations
 
 import json
 import logging
+import re
 
 from PySide6.QtCore import QSettings
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt")
+from ._ajustes import registro
 
-EXTERNO = "mh:"                        # comando del gestor de barras
+log = registro()
+from ._gestor import CLAVE_TEXTURAS_ANTES, PREFIJO_EXTERNO
+
+EXTERNO = PREFIJO_EXTERNO              # comando del gestor de barras
 VACIO = ""
 # Las bandas, de izquierda a derecha en pantalla.
 BANDAS = ("ai", "ae", "bi", "be")      # arriba dentro / fuera, abajo dentro / fuera
@@ -33,14 +37,14 @@ NOMBRE_TRI = ("arriba", "derecha", "abajo", "izquierda")
 NOMBRE_CENTRO = ("disco", "circulito")
 LIMITES = {"ai": (1, 6), "ae": (1, 10), "bi": (1, 6), "be": (1, 10)}
 OJOS = ("arriba", "derecha", "abajo", "izquierda")
-SOLO_OJOS = ("rueda", "historial", "ayuda")   # se abren al pasar por el ojo
+SOLO_OJOS = ("rueda", "historial")   # se abren al pasar por el ojo
+SOLO_EN_OJO = (*SOLO_OJOS, "texturas", "ayuda")   # no tienen icono para otros huecos
 ARO_ANGULOS = (30.0, 150.0, 210.0, 234.0, 306.0, 330.0)   # a 126° va siempre «volver»
 # Lo de la rueda (gajos, triángulos, centro y aro): una clave solo una vez.
 RUEDA = ("gajos", "tri", "centro", "aro")
 FIJOS = {"aro": len(ARO_ANGULOS), "gajos": 5, "tri": 4, "centro": 2,
          "lados": 7}                   # izquierda y derecha: encima del ojo, dentro, debajo (y el 2.º de dentro)
 CLAVE_AJUSTE = "huecos/config"
-CLAVE_AYUDA = "huecos/ayuda_puesta"     # la ayuda ya se puso una vez en el ojo verde
 CLAVE_CALC = "huecos/calc_puesta"       # la calculadora ya se puso una vez bajo Apagar
 CLAVE_ESCALA = "huecos/escala_primero"  # Escalar ya pasó una vez delante de Desplazar
 CLAVE_RUEDA = "huecos/rueda_233"        # la rueda ya cambió una vez a su reparto de la 2.33.0
@@ -48,10 +52,50 @@ CLAVE_OJO_ROJO = "huecos/ojo_rojo"      # «ocultar el resto» ya se puso una ve
 BANDA_BI = ("suprimir", "flip", "scale", "rotate")   # abajo · dentro, de serie (2.36.1)
 CLAVE_BOTONES = "huecos/botones_2361"    # el reparto de botones ya cambió una vez
 CLAVE_BOTONES_2392 = "huecos/botones_2392"
+CLAVE_GRUPOS = "huecos/grupos"         # los grupos de huecos, salvo la disposición de General (JSON)
+CLAVE_ACTIVO = "huecos/activo"         # el id del grupo activo
+ID_GENERAL = 0                         # General guarda su disposición en CLAVE_AJUSTE
+MAX_JUEGOS = 8
+MAX_NOMBRE = 24
+COLORES_JUEGO = ("#2b63c8", "#d7781e", "#2f8f4e", "#9b3fb5",
+                 "#c8352b", "#148c8c", "#7a6a2a", "#4a4a4a")
+
+
+def clave_ojo(clave: str) -> str:
+    """Lo que va en un ojo, al día: la ayuda de antes y el nombre antiguo de
+    las texturas pasan a «texturas» (si esta edición la lleva; si no, la
+    ayuda se queda en su ojo, que abre Opciones ▸ Ayuda, y las texturas se
+    quitan)."""
+    from . import _edicion
+    if clave in ("ayuda", CLAVE_TEXTURAS_ANTES):
+        if _edicion.con("texturas"):
+            return "texturas"
+        return "ayuda" if _edicion.con("panel_ayuda") else VACIO
+    if clave == "texturas" and not _edicion.con("texturas"):
+        return VACIO
+    return clave
 
 
 def externo(clave) -> bool:
     return isinstance(clave, str) and clave.startswith(EXTERNO)
+
+
+def _entero(valor) -> bool:
+    return isinstance(valor, int) and not isinstance(valor, bool)
+
+
+def contenedor_valido(obj) -> bool:
+    """Si ``obj`` (el JSON de los grupos, ya decodificado) se puede usar. Lo
+    demás de cada grupo (huecos, nombre, color) se tolera al leerlo."""
+    if not isinstance(obj, dict):
+        return False
+    juegos = obj.get("juegos")
+    if not isinstance(juegos, list) or not juegos or len(juegos) > MAX_JUEGOS:
+        return False
+    if not all(isinstance(j, dict) and _entero(j.get("id")) for j in juegos):
+        return False
+    ids = [j["id"] for j in juegos]
+    return len(set(ids)) == len(ids) and ID_GENERAL in ids
 
 
 class Huecos:
@@ -59,11 +103,20 @@ class Huecos:
     (bandas, «chicos» y «aro» como listas; «ojos» como dict). Cada cambio
     se guarda y llama a ``al_cambiar``."""
 
-    def __init__(self, defecto: dict, angulos_chicos: tuple, al_cambiar=None) -> None:
+    def __init__(self, defecto: dict, angulos_chicos: tuple, al_cambiar=None, al_activar=None) -> None:
         self.defecto = json.loads(json.dumps(defecto))
         self.angulos_chicos = tuple(angulos_chicos)
         self.al_cambiar = al_cambiar
-        self.datos = self._cargar()
+        self.al_activar = al_activar
+        self._cargar_todo()
+
+    @property
+    def datos(self) -> dict:
+        """La disposición del grupo activo."""
+        juego = self._juego(self._id_activo)
+        if self._id_activo == ID_GENERAL or juego is None:
+            return self._general
+        return juego["huecos"]
 
     # ---- guardar / cargar ----------------------------------------------------------
     @staticmethod
@@ -71,16 +124,42 @@ class Huecos:
         from ._ajustes import ajustes
         return ajustes()
 
-    def _cargar(self) -> dict:
-        datos = json.loads(json.dumps(self.defecto))
+    def _cargar_todo(self) -> None:
+        self._general = self._cargar_general()
+        self._contenedor = self._leer_contenedor()
+        self._id_activo = self._leer_activo()
+
+    def _leer_contenedor(self):
+        """Los grupos guardados, o None si no hay o no se pueden usar (entonces
+        la clave no se toca: solo se apunta en el registro)."""
+        texto = self._ajustes().value(CLAVE_GRUPOS, "")
+        if not texto:
+            return None
         try:
-            texto = self._ajustes().value(CLAVE_AJUSTE, "")
-            guardado = json.loads(texto) if texto else {}
-        except Exception:  # noqa: BLE001 — una configuración rota no rompe la barra
-            log.exception("configuración de huecos ilegible: se usa la de siempre")
-            guardado = {}
+            contenedor = json.loads(texto)
+        except (TypeError, ValueError):
+            contenedor = None
+        if not contenedor_valido(contenedor):
+            log.error("grupos de huecos no válidos, se usa General: %r", texto)
+            return None
+        for juego in contenedor["juegos"]:
+            if juego["id"] != ID_GENERAL:
+                juego["huecos"] = self._normalizar(juego.get("huecos"))
+        return contenedor
+
+    def _leer_activo(self) -> int:
+        try:
+            id_juego = int(self._ajustes().value(CLAVE_ACTIVO, ID_GENERAL))
+        except (TypeError, ValueError):
+            return ID_GENERAL
+        return id_juego if self._juego(id_juego) is not None else ID_GENERAL
+
+    def _normalizar(self, guardado) -> dict:
+        """Una disposición completa: lo de ``guardado`` que sea válido y, en
+        lo demás, lo de serie."""
         if not isinstance(guardado, dict):
             guardado = {}
+        datos = json.loads(json.dumps(self.defecto))
         for g in BANDAS:
             lista = guardado.get(g)
             lo, hi = LIMITES[g]
@@ -93,7 +172,34 @@ class Huecos:
         ojos = guardado.get("ojos")
         if isinstance(ojos, dict):
             datos["ojos"] = {o: str(ojos.get(o, VACIO) or VACIO) for o in OJOS}
-            self._poner_ayuda(datos)
+            # La ayuda pasó a Opciones (2.42.0): su ojo abre la biblioteca de
+            # texturas (``texturas``, guardada antes con otro nombre).
+            datos["ojos"] = {o: clave_ojo(k) for o, k in datos["ojos"].items()}
+        return self._de_esta_edicion(datos)
+
+    @staticmethod
+    def _de_esta_edicion(datos) -> dict:
+        """Lo guardado con claves de partes que esta edición no lleva se queda
+        en blanco (sin error); los ojos, al día (``clave_ojo``)."""
+        from . import _edicion
+        for g, valor in datos.items():
+            if isinstance(valor, list):
+                datos[g] = [k if _edicion.clave(k) else VACIO for k in valor]
+            elif isinstance(valor, dict):
+                datos[g] = {o: (clave_ojo(k) if _edicion.clave(clave_ojo(k)) else VACIO)
+                            for o, k in valor.items()}
+        return datos
+
+    def _cargar_general(self) -> dict:
+        try:
+            texto = self._ajustes().value(CLAVE_AJUSTE, "")
+            guardado = json.loads(texto) if texto else {}
+        except Exception:  # noqa: BLE001 — una configuración rota no rompe la barra
+            log.exception("configuración de huecos ilegible: se usa la de siempre")
+            guardado = {}
+        if not isinstance(guardado, dict):
+            guardado = {}
+        datos = self._normalizar(guardado)
         self._quitar_menus(datos)
         self._escala_primero(datos)
         self._rueda_233(datos)
@@ -268,26 +374,12 @@ class Huecos:
             except Exception:  # noqa: BLE001
                 log.exception("no se pudo guardar el cambio del botón de menús")
 
-    def _poner_ayuda(self, datos) -> None:
-        """La ayuda va de serie en el ojo de la derecha (el verde). A quien ya
-        tenía los ojos guardados se le pone una sola vez, si ese ojo estaba
-        vacío; si luego la quita, no vuelve."""
-        ajustes = self._ajustes()
-        if str(ajustes.value(CLAVE_AYUDA, "")).lower() in ("1", "true"):
-            return
-        ajustes.setValue(CLAVE_AYUDA, True)
-        ojos = datos["ojos"]
-        if "ayuda" in ojos.values() or ojos.get("derecha"):
-            return
-        ojos["derecha"] = "ayuda"
-        try:
-            ajustes.setValue(CLAVE_AJUSTE, json.dumps(datos, ensure_ascii=False))
-        except Exception:  # noqa: BLE001
-            log.exception("no se pudo guardar la ayuda en el ojo verde")
-
     def _guardar(self) -> None:
         try:
-            self._ajustes().setValue(CLAVE_AJUSTE, json.dumps(self.datos, ensure_ascii=False))
+            if self._id_activo == ID_GENERAL:
+                self._ajustes().setValue(CLAVE_AJUSTE, json.dumps(self.datos, ensure_ascii=False))
+            else:
+                self._guardar_grupos()
         except Exception:  # noqa: BLE001
             log.exception("no se pudo guardar la configuración de huecos")
         if callable(self.al_cambiar):
@@ -295,6 +387,149 @@ class Huecos:
                 self.al_cambiar()
             except Exception:  # noqa: BLE001
                 log.exception("fallo al aplicar la configuración de huecos")
+
+    def _guardar_grupos(self) -> None:
+        self._ajustes().setValue(CLAVE_GRUPOS, json.dumps(self._contenedor, ensure_ascii=False))
+
+    def _avisar_activo(self) -> None:
+        if callable(self.al_activar):
+            try:
+                self.al_activar()
+            except Exception:  # noqa: BLE001
+                log.exception("fallo al aplicar el grupo de huecos")
+
+    # ---- los grupos -------------------------------------------------------------------
+    def _juego(self, id_juego):
+        """La entrada del grupo ``id_juego``, o None. Sin grupos guardados
+        solo existe General, que aún no tiene entrada."""
+        if self._contenedor is None:
+            return {"id": ID_GENERAL, "nombre": ""} if id_juego == ID_GENERAL else None
+        return next((j for j in self._contenedor["juegos"] if j["id"] == id_juego), None)
+
+    def _asegurar_contenedor(self) -> dict:
+        if self._contenedor is None:
+            self._contenedor = {"siguiente_id": 1, "juegos": [
+                {"id": ID_GENERAL, "nombre": "", "color": COLORES_JUEGO[0]}]}
+        return self._contenedor
+
+    @staticmethod
+    def _color_de(juego, posicion: int) -> str:
+        color = juego.get("color")
+        if isinstance(color, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            return color
+        return COLORES_JUEGO[posicion % len(COLORES_JUEGO)]
+
+    def _poner_activo(self, id_juego: int) -> None:
+        self._id_activo = id_juego
+        try:
+            self._ajustes().setValue(CLAVE_ACTIVO, id_juego)
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo guardar el grupo activo")
+        log.info("grupo de huecos activo: %s", id_juego)
+
+    @property
+    def id_activo(self) -> int:
+        return self._id_activo
+
+    def n_juegos(self) -> int:
+        return 1 if self._contenedor is None else len(self._contenedor["juegos"])
+
+    def nombre_visible(self, id_juego) -> str:
+        """El nombre tal como se ve. El de un grupo no se traduce nunca; solo
+        el de General mientras no se haya renombrado."""
+        juego = self._juego(id_juego)
+        nombre = juego.get("nombre") if juego is not None else ""
+        if isinstance(nombre, str) and nombre:
+            return nombre
+        if id_juego == ID_GENERAL:
+            from ._idioma import _tr
+            return _tr("General")
+        return ""
+
+    def juegos(self) -> list:
+        """``[(id, nombre visible, color)]`` en el orden de los puntos."""
+        if self._contenedor is None:
+            return [(ID_GENERAL, self.nombre_visible(ID_GENERAL), COLORES_JUEGO[0])]
+        return [(j["id"], self.nombre_visible(j["id"]), self._color_de(j, i))
+                for i, j in enumerate(self._contenedor["juegos"])]
+
+    def validar_nombre(self, nombre, id_propio=None):
+        """None si ``nombre`` vale; si no, ``(plantilla sin traducir, argumentos)``."""
+        limpio = (nombre or "").strip()
+        if not limpio:
+            return ("Escribe un nombre.", ())
+        if len(limpio) > MAX_NOMBRE:
+            return ("El nombre admite hasta {0} caracteres.", (MAX_NOMBRE,))
+        clave = limpio.casefold()
+        for id_juego, visible, _color in self.juegos():
+            if id_juego != id_propio and visible.casefold() == clave:
+                return ("Ese nombre ya existe.", ())
+        return None
+
+    def activar(self, id_juego) -> bool:
+        """Pasa al grupo ``id_juego``. False si ya era el activo o no existe."""
+        if id_juego == self._id_activo or self._juego(id_juego) is None:
+            return False
+        self._poner_activo(id_juego)
+        self._avisar_activo()
+        return True
+
+    def nuevo(self, nombre):
+        """Crea un grupo, copia del activo, y lo deja activo. Devuelve un motivo o None."""
+        motivo = self.validar_nombre(nombre)
+        if motivo is not None:
+            return motivo
+        if self.n_juegos() >= MAX_JUEGOS:
+            return ("Ya hay {0} grupos, el máximo.", (MAX_JUEGOS,))
+        disposicion = json.loads(json.dumps(self.datos))
+        contenedor = self._asegurar_contenedor()
+        juegos = contenedor["juegos"]
+        siguiente = contenedor.get("siguiente_id")
+        id_juego = max(siguiente if _entero(siguiente) else 0, max(j["id"] for j in juegos) + 1)
+        usados = {self._color_de(j, i) for i, j in enumerate(juegos)}
+        color = next((c for c in COLORES_JUEGO if c not in usados), COLORES_JUEGO[0])
+        juegos.append({"id": id_juego, "nombre": nombre.strip(), "color": color, "huecos": disposicion})
+        contenedor["siguiente_id"] = id_juego + 1
+        self._guardar_grupos()
+        self._poner_activo(id_juego)
+        self._avisar_activo()
+        return None
+
+    def renombrar(self, id_juego, nombre):
+        """Cambia el nombre de un grupo. Devuelve un motivo o None."""
+        motivo = self.validar_nombre(nombre, id_juego)
+        if motivo is not None:
+            return motivo
+        limpio = nombre.strip()
+        if id_juego == ID_GENERAL:
+            from ._idioma import _tr
+            if limpio == _tr("General"):
+                limpio = ""
+        self._asegurar_contenedor()
+        juego = self._juego(id_juego)
+        if juego is None:
+            return ("Ese grupo ya no existe.", ())
+        juego["nombre"] = limpio
+        self._guardar_grupos()
+        self._avisar_activo()
+        return None
+
+    def borrar(self, id_juego) -> bool:
+        """Elimina un grupo (General no se puede). Si era el activo, pasa a General."""
+        juego = self._juego(id_juego)
+        if id_juego == ID_GENERAL or juego is None:
+            return False
+        self._contenedor["juegos"].remove(juego)
+        self._guardar_grupos()
+        if id_juego == self._id_activo:
+            self._poner_activo(ID_GENERAL)
+        self._avisar_activo()
+        return True
+
+    def recargar(self) -> None:
+        """Vuelve a leerlo todo, sin volcar lo que había en memoria (tras importar)."""
+        self._cargar_todo()
+        self._avisar_activo()
 
     # ---- lectura ---------------------------------------------------------------------
     def banda(self, g) -> tuple:
@@ -331,8 +566,8 @@ class Huecos:
     # ---- cambios ---------------------------------------------------------------------
     def admite(self, grupo, clave) -> str:
         """«» si ``clave`` puede ir en ``grupo``; si no, por qué."""
-        if clave in SOLO_OJOS and grupo != "ojos":
-            return "La rueda, el historial y la ayuda solo pueden ir en un ojo."
+        if clave in SOLO_EN_OJO and grupo != "ojos":
+            return "La rueda, el historial y las texturas solo pueden ir en un ojo."
         return ""
 
     def poner(self, grupo, i, clave) -> str:
@@ -421,5 +656,10 @@ class Huecos:
         return True
 
     def por_defecto(self) -> None:
-        self.datos = json.loads(json.dumps(self.defecto))
+        """Vuelve a poner de serie el grupo activo."""
+        de_serie = json.loads(json.dumps(self.defecto))
+        if self._id_activo == ID_GENERAL:
+            self._general = de_serie
+        else:
+            self._juego(self._id_activo)["huecos"] = de_serie
         self._guardar()

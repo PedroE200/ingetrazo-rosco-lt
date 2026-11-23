@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
 <!-- Icono de las Tareas: la libreta (espiral, casillas marcadas, bolígrafo) en estilo
-     plano. Tapa negra, hoja con el degradado azul marino -> turquesa,
-     casillas y renglones en blanco y anillas blancas con un borde negro fino. -->
+     plano. Tapa negra, hoja con el degradado azul marino -> turquesa, casillas y renglones
+     en blanco y anillas blancas con un borde negro fino. -->
 <defs>
 <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
 <stop offset="0" stop-color="#0d2f66"/><stop offset="0.5" stop-color="#17739a"/><stop offset="1" stop-color="#2cc4bd"/>

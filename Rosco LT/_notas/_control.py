@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""El controlador de las Tareas de Rosco LT: el botón de Tareas
-en la barra «Rosco LT», las dos entradas en Extensiones ▸
-Rosco LT y una sola ventana reutilizada.
+"""El controlador de las Tareas de Rosco: el botón de Tareas
+en la barra «Rosco», las dos entradas en Extensiones ▸
+Rosco y una sola ventana reutilizada.
 
-El interruptor de Rosco LT no las toca: con ella apagada, las Tareas
-siguen a mano (por eso el botón no va en ``_rosco_lt_refs`` ni las entradas
-en ``_rosco_lt_menu``)."""
+El interruptor de Rosco no las toca: con ella apagada, las Tareas
+siguen a mano (por eso el botón no va en ``atributo("refs")`` ni las
+entradas en ``atributo("menu")``)."""
 from __future__ import annotations
 
 from .._idioma import _tr
@@ -16,10 +16,9 @@ from PySide6.QtGui import QAction
 
 from . import _datos, _iconos
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt")
+from .._ajustes import registro
 
-# La clave de las tareas del modelo en el .igz.
-CLAVE_DATOS = "rosco_lt_tareas"
+log = registro()
 
 TEXTOS = {
     "notas_modelo": ("modelo", "Tareas del modelo actual", "Lista de tareas del modelo actual"),
@@ -31,11 +30,11 @@ TEXTOS = {
 class ListasTareas:
 
     def __init__(self, app) -> None:
-        self.diana = app                         # menús y barra de Rosco LT
-        # Los datos del modelo van por su propia clave: una copia de la
-        # app con esa clave.
+        self.diana = app                         # menús y barra de Rosco
+        # Los datos del modelo van por su propia clave (``_datos.CLAVE_MODELO``):
+        # una copia de la app con esa clave.
         self.app = copy.copy(app)
-        self.app.key = CLAVE_DATOS
+        self.app.key = _datos.CLAVE_MODELO
         self.almacen = _datos.Almacen()
         self._ventana = None
         self._acciones = {}
@@ -66,7 +65,7 @@ class ListasTareas:
         self._boton = QAction(_iconos.libreta(), _tr("Tareas"), win)
         self._boton.setStatusTip(_tr("Listas de tareas del modelo y de IngeTrazo"))
         self._boton.triggered.connect(lambda _c=False: self.ventana().mostrar())
-        barra(self.diana).addAction(_tr(self._boton))
+        barra(self.diana).addAction(self._boton)
 
     # ---- La ventana (una sola, reutilizada) --------------------------------------------
     def ventana(self):

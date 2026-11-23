@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""La Simetría de Rosco LT: refleja la selección en un plano, viendo
+"""La Simetría de Rosco: refleja la selección en un plano, viendo
 antes el plano y el resultado en fantasma.
 
 Cómo se elige el plano (Tab pasa de un modo a otro):
@@ -31,7 +31,7 @@ de IngeTrazo, con cualquier plano).
 from __future__ import annotations
 
 from ._ajustes import ext_al_dia
-from ._idioma import _tr
+from ._idioma import con_nombre, _tr
 import logging
 import math
 
@@ -41,8 +41,9 @@ from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QPen, QPolygonF,
 from core.history import Command
 from tools.base import Tool, ToolContext
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.simetria")
+from ._ajustes import registro
 
+log = registro("simetria")
 CLAVE = "rosco"                       # group.ext[CLAVE]["hotspots"]
 EJES = {"x": QVector3D(1, 0, 0), "y": QVector3D(0, 1, 0), "z": QVector3D(0, 0, 1)}
 COLOR_EJE = {"x": QColor(214, 40, 40), "y": QColor(40, 160, 60), "z": QColor(40, 90, 214)}
@@ -103,7 +104,7 @@ class _Hotspots(Command):
 
 
 class Simetria(Tool):
-    name = "Rosco LT · simetría"
+    name = con_nombre("Rosco · simetría")
     icon = "flip"
     description = "Mirror the selection across a face, an edge, an axis, two points or a hotspot."
     uses_snap = True

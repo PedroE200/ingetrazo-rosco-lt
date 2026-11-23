@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Los temas de la barra de Rosco LT: A · Relieve 3D, B · Transparente con
+"""Los temas de la barra de Rosco: A · Relieve 3D, B · Transparente con
 glifos (desde la 2.12.0 no quedan los demás; hasta la 2.12.0 se llamaban F
 y G) y, desde la 2.17.0, C a N: el B en color, con glifos de líneas y
 sombreado (``paleta``). Se eligen en
@@ -10,7 +10,7 @@ Cada tema da los radios de las dos bandas, el tamaño de sus iconos, la
 escala de la diana, el ancho de la capa y del submenú, y qué se pliega:
 
 - ``cursor_ligero``: mientras el ratón se mueve, el cursor lleva solo el
-  anillo. Windows dibuja por hardware los cursores de hasta 256 px; los
+  anillo. el sistema dibuja por hardware los cursores de hasta 256 px; los
   mayores los compone por software y van a tirones (y en algún equipo se
   recortan por los bordes). Lo demás aparece al parar el ratón, que es
   cuando se puede hacer clic.
@@ -28,7 +28,7 @@ escala de la diana, el ancho de la capa y del submenú, y qué se pliega:
   rueda (``_diana.rueda_pintar``); al salir de ella vuelven los arcos.
 - ``relieve``: las bandas, los botoncitos y los chips con volumen
   (degradado, sombra y biseles) y el botón activo rayado en verde.
-- ``glifos``: todos los iconos de Rosco LT en silueta negra con detalles en
+- ``glifos``: todos los iconos de Rosco en silueta negra con detalles en
   blanco y halo (``_iconos.SILUETAS``), en vez de los de colores. El tema B
   es el A con esto y sin relieve: bandas y botoncitos de solo contorno.
 - ``paleta`` (con ``glifos``): los temas C a N. Los glifos van en líneas

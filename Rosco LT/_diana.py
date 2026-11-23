@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""La diana de vistas (común a la barra de dibujo y a la barra de selección).
+"""La diana de vistas (común al anillo y a la barra de selección).
 
     centro, mitad de arriba ... zoom extensión (centrar el modelo)
     centro, triángulo rojo .... interruptor vista frontal / posterior
@@ -16,6 +16,7 @@ con el encuadre (``al_encuadre``) y tras cada acción (``al_terminar``).
 """
 from __future__ import annotations
 
+from ._flotante import mover_a
 from ._gestor import gestor_barras
 from ._idioma import _tr
 import logging
@@ -113,9 +114,14 @@ ABANICO_PASO = 18.0                    # grados entre sus botones
 ABANICO = {"abierto": False}
 RUEDA_TEXTOS = {"zoom_sel": "zoom sel.", "zoom_previo": "zoom previo",
                 "encuadre": "encuadre", "ocultar_resto": "ocultar resto",
-                "objetos_ocultos": "obj. ocultos", "seccion": "plano secc."}
-RUEDA_PARTES = ("centrar", "sup_inf", "cerrar_rueda", *RUEDA_GAJOS, *RUEDA_TRI, *RUEDA_BOTONES,
-                *ARO_PROPIAS, *CAMARA_HERR, "objetos_ocultos")
+                "objetos_ocultos": "obj. ocultos", "seccion": "plano secc.",
+                "alinear_vista": "alinear vista"}
+# 3.1.0: gajos partidos en dos mitades, una al lado de la otra: la de la
+# izquierda (más ángulo) es la orden del gajo y la de la derecha, la otra.
+from . import _edicion  # noqa: E402
+PARTIDOS = {"zoom_sel": "alinear_vista"} if _edicion.con("alinear_vista") else {}
+RUEDA_PARTES = ("centrar", "modo2d", "sup_inf", "cerrar_rueda", *RUEDA_GAJOS, *RUEDA_TRI, *RUEDA_BOTONES,
+                *ARO_PROPIAS, *CAMARA_HERR, "objetos_ocultos", "alinear_vista")
 AMARILLO, MARRON = QColor(246, 197, 74), QColor(122, 74, 32)
 # Las órdenes de IngeTrazo de los botones del aro (por su texto de menú).
 MOSTRAR_ULTIMO = ("Mostrar último", "Unhide Last", "Último", "Last", "Mostrar lo último")
@@ -128,7 +134,7 @@ PARTES = ("centrar", "frente_detras", *CORONA.values(), *VISTAS,
           *CHICOS, *FILA, *RUEDA_PARTES)
 # Lo que ``Diana.usar`` sabe hacer (lo demás que se ponga en el aro lo hace
 # la barra).
-PROPIAS = frozenset(("centrar", "zoom_sel", "zoom_previo", "encuadre", "ocultar_resto",
+PROPIAS = frozenset(("centrar", "modo2d", "zoom_sel", "alinear_vista", "zoom_previo", "encuadre", "ocultar_resto",
                      "frente_detras", *VISTAS, "vista_frontal", "vista_posterior", "sup_inf",
                      "proyeccion", *ARO_PROPIAS, *CAMARA_HERR, "seccion",
                      "deshacer", "rehacer", "conica", "paralela",
@@ -177,12 +183,24 @@ def texto_corto(clave) -> str:
     return nombre if len(nombre) <= 13 else nombre[:12] + "…"
 
 
+def disco_partido() -> bool:
+    """El disco de la rueda con zoom extensión va partido: arriba zoom
+    extensión y abajo el Modo 2D."""
+    return RUEDA_DISCO == "centrar" and _edicion.con("modo2d")
+
+
 def es_parte_rueda(parte) -> bool:
+    if parte == "modo2d":
+        return disco_partido()
+    for gajo, otra in PARTIDOS.items():
+        if parte == otra:
+            return gajo in RUEDA_GAJOS
     return bool(parte) and (parte in (RUEDA_DISCO, RUEDA_CIRCULITO, "cerrar_rueda")
                             or parte in RUEDA_GAJOS or parte in RUEDA_TRI
                             or parte in RUEDA_BOTONES
                             or (ABANICO["abierto"] and parte in CAMARA_HERR))
 NOMBRES = {"centrar": "Zoom extensión", "frente_detras": "Vista frontal / posterior",
+           "modo2d": "Modo 2D: paralela, vista superior y zoom (a la selección si la hay)",
            "sup_inf": "Vista superior ⇄ inferior (amarillo: superior; marrón: inferior)",
            "proyeccion": "Cónica ⇄ paralela (muestra la vista actual)",
            "cerrar_rueda": "Cerrar la barra",
@@ -196,6 +214,7 @@ NOMBRES = {"centrar": "Zoom extensión", "frente_detras": "Vista frontal / poste
            "volver": "Volver al anillo",
            "vista_frontal": "Vista frontal", "vista_posterior": "Vista posterior",
            "zoom_sel": "Zoom a la selección", "zoom_previo": "Zoom previo",
+           "alinear_vista": "Alinear la vista: de frente a la cara seleccionada, en paralela",
            "encuadre": "Encuadre (mano)", "ocultar_resto": "Ocultar / mostrar el resto",
            "vista_arriba": "Vista superior", "vista_abajo": "Vista inferior",
            "vista_derecha": "Vista derecha", "vista_izquierda": "Vista izquierda",
@@ -206,6 +225,7 @@ NOMBRES = {"centrar": "Zoom extensión", "frente_detras": "Vista frontal / poste
            "ext": "Gestor de extensiones",
            "bar": "Gestor de barras (si está instalado)",
            "reiniciar": "Reiniciar IngeTrazo"}
+NOMBRES, RUEDA_TEXTOS = _edicion.limpiar(NOMBRES), _edicion.limpiar(RUEDA_TEXTOS)
 # El ángulo (Qt: 0 = derecha, 90 = arriba) de cada lado.
 _ANGULO = {"arriba": 90.0, "derecha": 0.0, "abajo": 270.0, "izquierda": 180.0}
 _TRIANGULO = {"vista_arriba": 90.0, "vista_derecha": 0.0,
@@ -342,7 +362,7 @@ def _boton_aro_pintar(painter, clave, q, icono=None, marcado: bool = False) -> N
     painter.save()
     painter.setRenderHint(QPainter.Antialiasing)
     painter.setPen(QPen(QColor(176, 27, 27), 2.2))
-    painter.setBrush(QBrush(QColor(253, 226, 226) if marcado else QColor(255, 255, 255)))
+    painter.setBrush(QBrush(QColor(255, 196, 214) if marcado else QColor(255, 255, 255)))
     painter.drawEllipse(q, ARO_BOTON_R, ARO_BOTON_R)
     from . import _iconos
     _iconos.pintar(painter, icono or clave, q, ARO_ICONO)
@@ -365,6 +385,33 @@ def _rueda_gajo(cc, i, r) -> QPainterPath:
     from ._flotante import sector
     _rb, _rc, ri, re = _rueda_radios(r)
     return sector(cc, ri, re, 90.0 + RUEDA_PASO * i - RUEDA_PASO / 2.0, RUEDA_PASO, 3.0)
+
+
+def rueda_mitades(cc, i, r) -> list:
+    """Las dos mitades del gajo partido ``i``: ``[(parte, path, ángulo
+    del medio)]``; la de la izquierda (más ángulo), la orden del gajo."""
+    from ._flotante import sector
+    _rb, _rc, ri, re = _rueda_radios(r)
+    g = 90.0 + RUEDA_PASO * i
+    medio = RUEDA_PASO / 2.0
+    parte = RUEDA_GAJOS[i]
+    return [(parte, sector(cc, ri, re, g, medio, 3.0), g + medio / 2.0),
+            (PARTIDOS[parte], sector(cc, ri, re, g - medio, medio, 3.0), g - medio / 2.0)]
+
+
+def _contenido_mitad(painter, cc, i, parte, bajo, r) -> None:
+    """El icono y la etiqueta (en dos renglones) de una mitad de gajo."""
+    _rb, _rc, ri, re = _rueda_radios(r)
+    a = next(a for p, _path, a in rueda_mitades(cc, i, r) if p == parte)
+    m = _pt(cc, (ri + re) / 2.0 - 1.5, a)
+    f = QFont(painter.font())
+    f.setPointSizeF(6.3)
+    f.setBold(False)
+    painter.setFont(f)
+    glifo(painter, parte, QPointF(m.x(), m.y() - 10.0), ROJO_OSCURO if parte == bajo else NEGRO, 18.0)
+    painter.setPen(QColor(44, 44, 42))
+    painter.drawText(QRectF(m.x() - 24.0, m.y(), 48.0, 26.0), Qt.AlignHCenter | Qt.AlignTop,
+                     texto_corto(parte).replace(" ", "\n", 1))
 
 
 def rueda_parte_en(cc, p, r: float = RUEDA_R):
@@ -390,11 +437,16 @@ def rueda_parte_en(cc, p, r: float = RUEDA_R):
     if d <= rb + 1.5:
         return RUEDA_CIRCULITO or None
     if d <= rc:
+        if disco_partido() and dy < 0.0:
+            return "modo2d"                  # la mitad de abajo del disco
         return RUEDA_DISCO or None
     ang = math.degrees(math.atan2(dy, dx)) % 360.0
     if d <= re + TOLERANCIA:
-        i = int(((ang - (90.0 - RUEDA_PASO / 2.0)) % 360.0) // RUEDA_PASO)
-        return RUEDA_GAJOS[min(i, len(RUEDA_GAJOS) - 1)] or None
+        i = min(int(((ang - (90.0 - RUEDA_PASO / 2.0)) % 360.0) // RUEDA_PASO), len(RUEDA_GAJOS) - 1)
+        parte = RUEDA_GAJOS[i]
+        if parte in PARTIDOS and (ang - (90.0 + RUEDA_PASO * i) + 180.0) % 360.0 - 180.0 < 0.0:
+            return PARTIDOS[parte]           # la mitad de la derecha
+        return parte or None
     if d <= r + 6.0:
         for parte, g in RUEDA_TRI.items():
             if abs((ang - g + 180.0) % 360.0 - 180.0) <= 9.0:
@@ -434,6 +486,16 @@ def rueda_pintar(painter, cc, bajo=None, proyeccion: str = "perspective",
     f.setBold(False)
     painter.setFont(f)
     for i, parte in enumerate(RUEDA_GAJOS):
+        if parte in PARTIDOS:
+            for mitad, path, _a in rueda_mitades(cc, i, r):
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(relieve_banda(cc, ri, re))
+                painter.drawPath(path)
+                painter.setPen(QPen(ROJO, 1.3))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawPath(path)
+                _contenido_mitad(painter, cc, i, mitad, bajo, r)
+            continue
         gajo = _rueda_gajo(cc, i, r)
         painter.setPen(Qt.NoPen)
         if parte == "proyeccion":
@@ -454,7 +516,26 @@ def rueda_pintar(painter, cc, bajo=None, proyeccion: str = "perspective",
     painter.setPen(QPen(ROJO, 2.0))
     painter.setBrush(relieve_banda(cc, 0.0, rc))
     painter.drawEllipse(cc, rc, rc)
-    if RUEDA_DISCO:
+    if disco_partido():
+        # Partido por una raya: arriba zoom extensión, abajo el Modo 2D.
+        painter.setPen(QPen(ROJO, 1.4))
+        painter.drawLine(QPointF(cc.x() - rc + 1.0, cc.y()), QPointF(cc.x() - rb - 2.0, cc.y()))
+        painter.drawLine(QPointF(cc.x() + rb + 2.0, cc.y()), QPointF(cc.x() + rc - 1.0, cc.y()))
+        painter.setPen(QColor(44, 44, 42))
+        painter.drawText(QRectF(cc.x() - 30.0, cc.y() - rc * 0.72, 60.0, 12.0), Qt.AlignCenter,
+                         _tr(texto_corto(RUEDA_DISCO)))
+        glifo(painter, RUEDA_DISCO, QPointF(cc.x() - rc * 0.55, cc.y() - rc * 0.28), NEGRO, 11.0)
+        painter.drawText(QRectF(cc.x() - 30.0, cc.y() + rc * 0.42, 60.0, 12.0), Qt.AlignCenter,
+                         _tr("modo 2D"))
+        _plano(painter, QPointF(cc.x() - rc * 0.55, cc.y() + rc * 0.24), 0.62)
+        negrita = QFont(f)
+        negrita.setPointSizeF(8.5)
+        negrita.setBold(True)
+        painter.setFont(negrita)
+        painter.setPen(ROJO)
+        painter.drawText(QRectF(cc.x() + rc * 0.25, cc.y() + rc * 0.06, 22.0, 12.0), Qt.AlignCenter, "2D")
+        painter.setFont(f)
+    elif RUEDA_DISCO:
         glifo(painter, RUEDA_DISCO, QPointF(cc.x(), cc.y() + rc * 0.58), NEGRO, 15.0)
         painter.setPen(QColor(44, 44, 42))
         painter.drawText(QRectF(cc.x() - 30.0, cc.y() - rc * 0.72, 60.0, 12.0), Qt.AlignCenter,
@@ -494,6 +575,19 @@ def rueda_pintar(painter, cc, bajo=None, proyeccion: str = "perspective",
         for clave in CAMARA_HERR:
             _boton_aro_pintar(painter, clave, rueda_centro_abanico(cc, clave, r))
     painter.restore()
+
+
+def _plano(p, c, s=1.0) -> None:
+    """El icono del Modo 2D: una planta vista desde arriba (tabique y puerta)."""
+    p.save()
+    p.setPen(QPen(QColor(30, 30, 30), 1.4 * s))
+    p.setBrush(QBrush(QColor(142, 197, 232)))
+    p.drawRect(QRectF(c.x() - 8 * s, c.y() - 5.5 * s, 16 * s, 11 * s))
+    p.drawLine(QPointF(c.x() + 1 * s, c.y() - 5.5 * s), QPointF(c.x() + 1 * s, c.y() + 1 * s))
+    p.setPen(QPen(ROJO, 1.2 * s))
+    p.setBrush(Qt.NoBrush)
+    p.drawArc(QRectF(c.x() - 3 * s, c.y() - 2.5 * s, 8 * s, 8 * s), 0, 90 * 16)
+    p.restore()
 
 
 def _rueda_contenido(painter, cc, i, parte, proyeccion, bajo, r) -> None:
@@ -553,13 +647,23 @@ def rueda_pintar_bajo(painter, cc, bajo, proyeccion: str = "perspective",
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(gajo)
         _rueda_contenido(painter, cc, i, bajo, proyeccion, bajo, r)
+    elif bajo in PARTIDOS.values() or (bajo in RUEDA_GAJOS and bajo in PARTIDOS):
+        gajo = bajo if bajo in RUEDA_GAJOS else next((g for g, o in PARTIDOS.items() if o == bajo), None)
+        if gajo in RUEDA_GAJOS:
+            for parte, path, _a in rueda_mitades(cc, RUEDA_GAJOS.index(gajo), r):
+                if parte == bajo:
+                    painter.fillPath(path, QBrush(tinte))
     elif bajo in RUEDA_GAJOS:
         painter.fillPath(_rueda_gajo(cc, RUEDA_GAJOS.index(bajo), r), QBrush(tinte))
-    elif bajo == RUEDA_DISCO:
+    elif bajo == RUEDA_DISCO or (bajo == "modo2d" and disco_partido()):
         disco = QPainterPath()
         disco.addEllipse(cc, rc, rc)
         hueco = QPainterPath()
         hueco.addEllipse(cc, rb, rb)
+        if disco_partido():
+            mitad = QPainterPath()
+            mitad.addRect(QRectF(cc.x() - rc, cc.y() if bajo == "modo2d" else cc.y() - rc, 2.0 * rc, rc))
+            disco = disco.intersected(mitad)
         painter.fillPath(disco.subtracted(hueco), QBrush(tinte))
     elif bajo == RUEDA_CIRCULITO:
         painter.drawEllipse(cc, rb, rb)
@@ -649,7 +753,7 @@ class Diana:
     def pintar(self, painter, cc, bajo=None, para_clic: bool = False,
                buscador: bool = False) -> None:
         """La diana. ``para_clic`` (barra fija) añade un relleno casi
-        invisible para que reciba el clic; en el cursor no va (Windows lo
+        invisible para que reciba el clic; en el cursor no va (el sistema lo
         pinta negro). ``buscador``: la barra de búsqueda encima."""
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
@@ -806,8 +910,12 @@ class Diana:
         try:
             if parte == "centrar":
                 self._llamar(win, "_on_zoom_extents")
+            elif parte == "modo2d" and _edicion.con("modo2d"):
+                self.modo_2d(viewport)
             elif parte == "zoom_sel":
                 self._llamar(win, "_on_zoom_selection")
+            elif parte == "alinear_vista" and _edicion.con("alinear_vista"):
+                self.alinear_vista(viewport)
             elif parte == "zoom_previo":
                 self.zoom_previo(viewport)
             elif parte == "encuadre":
@@ -866,6 +974,45 @@ class Diana:
         viewport.update()
         if callable(self.al_terminar):
             self.al_terminar()
+
+    def alinear_vista(self, viewport) -> None:
+        """La cámara de frente a la cara seleccionada (también inclinada o
+        dentro de un grupo abierto), en perpendicular, en vista paralela y
+        con la cara encuadrada."""
+        from PySide6.QtGui import QVector3D
+        from core.mesh import Face
+        sc = viewport.scene
+        caras = [e for e in list(getattr(sc, "selection", None) or ()) if isinstance(e, Face)]
+        if not caras:
+            viewport.flash_status(_tr("Alinear vista: selecciona una cara."), 4000)
+            return
+        cara = max(caras, key=lambda f: f.area())     # con varias, la mayor
+        n = QVector3D(cara.normal() if callable(cara.normal) else cara.normal)
+        c = QVector3D(cara.centroid() if callable(cara.centroid) else cara.centroid)
+        m = None
+        try:
+            m = self.app.window._edit_group_matrix()        # interno: el grupo abierto
+        except Exception:  # noqa: BLE001
+            m = None
+        if m is not None:
+            c = m.map(c)
+            n = m.mapVector(n)
+        if n.lengthSquared() < 1e-12:
+            viewport.flash_status(_tr("Alinear vista: la cara no tiene una dirección clara."), 4000)
+            return
+        n = n.normalized()
+        cam = viewport.camera
+        ojo = cam.eye() if callable(cam.eye) else cam.eye
+        if QVector3D.dotProduct(QVector3D(ojo) - c, n) < 0.0:
+            n = -n                               # se mira desde el lado en que estás
+        d = cam.distance() if callable(cam.distance) else cam.distance
+        d = max(float(d or 0.0), 1.0)
+        self._proyectar(viewport, "parallel")
+        if not cam.place(c + n * d, c):
+            cam.look_from(c + n * d, -n)
+        self._llamar(self.app.window, "_on_zoom_selection")
+        viewport.update()
+        viewport.flash_status(_tr("Vista alineada con la cara, en paralela."), 3000)
 
     def proyeccion_actual(self) -> str:
         try:
@@ -934,6 +1081,18 @@ class Diana:
         texto = {"top": "superior", "bottom": "inferior", "right": "derecha",
                  "left": "izquierda", "front": "frontal", "back": "posterior"}
         viewport.flash_status(_tr("Vista {0}.", texto.get(nombre, nombre)), 2000)
+
+    def modo_2d(self, viewport) -> None:
+        """Modo 2D: proyección paralela, vista superior y zoom extensión (o,
+        con algo seleccionado, zoom a la selección)."""
+        win = self.app.window
+        self._proyectar(viewport, "parallel")
+        self._vista(viewport, "top")
+        seleccion = bool(getattr(viewport.scene, "selection", None))
+        self._llamar(win, "_on_zoom_selection" if seleccion else "_on_zoom_extents")
+        viewport.update()
+        viewport.flash_status(_tr("Modo 2D: vista superior en paralela, zoom a la selección.") if seleccion
+                              else _tr("Modo 2D: vista superior en paralela, zoom extensión."), 3000)
 
     @staticmethod
     def _en_vista(viewport, nombre) -> bool:
@@ -1008,7 +1167,7 @@ class Diana:
         try:
             # Centrado sobre la barra de búsqueda, con la lista hacia abajo.
             r = rect_buscador(cc)
-            caja.move(viewport.mapToGlobal(QPoint(round(r.center().x() - caja.width() / 2.0),
+            mover_a(caja, viewport.mapToGlobal(QPoint(round(r.center().x() - caja.width() / 2.0),
                                                   round(r.top()))))
         except Exception:  # noqa: BLE001
             log.exception("no se pudo colocar el buscador")

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Los botones de la barra «Rosco LT» en baldosa: cuadrado de esquinas
+"""Los botones de la barra «Rosco» en baldosa: cuadrado de esquinas
 redondeadas con un degradado de abajo arriba (turquesa → azul → azul
 marino casi negro), borde azul noche, bisel claro arriba y oscuro abajo y
 brillo en la mitad de arriba. Encima, el dibujo del botón pasado a azules:

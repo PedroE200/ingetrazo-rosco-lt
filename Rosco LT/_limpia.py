@@ -15,8 +15,9 @@ from PySide6.QtCore import QEvent, QObject, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QDockWidget, QToolBar
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.anillo")
+from ._ajustes import registro
 
+log = registro("anillo")
 PARTES = (("menus", "Quitar menús"),
           ("barras", "Quitar barras de herramientas"),
           ("estado", "Quitar barra de estado (abajo)"),

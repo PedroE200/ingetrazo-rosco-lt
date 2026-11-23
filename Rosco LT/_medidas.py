@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""La ventanita de medidas de Rosco LT: un renglón por medida y una calculadora.
+"""La ventanita de medidas de Rosco: un renglón por medida y una calculadora.
 
 Aparece sola junto al cursor en cada punto (cada segmento de la línea, cada
 fase del rectángulo, la altura…) y lo sigue, con la medida actual en gris.
@@ -14,6 +14,7 @@ renglón activo, «Enter» además lo aplica y «Esc» la cierra sin usarlo.
 """
 from __future__ import annotations
 
+from ._flotante import mover_a
 from ._idioma import _tr
 import ast
 import logging
@@ -31,8 +32,9 @@ from PySide6.QtWidgets import (
 
 from ._voz import con_microfono, icono_microfono, medida_dictada, vigia
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.anillo")
+from ._ajustes import registro
 
+log = registro("anillo")
 ROJO = "#d62222"
 QUIETA_S = 0.3                         # ratón parado este tiempo: la ventanita se para
 ANCHO = 258                            # caben 10 cifras, la unidad y los botones
@@ -268,7 +270,7 @@ class _Renglon(QLineEdit):
         self._reloj.setSingleShot(True)
         self._reloj.setInterval(600)
         self._reloj.timeout.connect(self.poner_en_cifras)
-        self._componiendo = False             # Windows aún está escribiendo la frase
+        self._componiendo = False             # el sistema aún está escribiendo la frase
         self.textChanged.connect(self._quiza_dictado)
 
     def inputMethodEvent(self, ev) -> None:  # noqa: N802 — nombre de Qt
@@ -350,6 +352,21 @@ class Medidas(QWidget):
         self.titulo.setObjectName("titulo")
         self.titulo.setWordWrap(True)
         cabeza.addWidget(self.titulo, 1)
+        # Línea, Rectángulo, Polígono, Círculo y Arco: sin pasar a Empujar.
+        from PySide6.QtWidgets import QCheckBox
+        self.solo_2d = QCheckBox(_tr("Solo 2D"))
+        self.solo_2d.setObjectName("solo2d")
+        self.solo_2d.setStyleSheet(
+            "QCheckBox#solo2d { font-size: 10px; color: #333333; spacing: 4px; background: transparent; }"
+            "QCheckBox#solo2d::indicator { width: 11px; height: 11px; border: 1px solid #888888;"
+            " border-radius: 2px; background: #ffffff; }"
+            "QCheckBox#solo2d::indicator:checked { background: #d62222; border-color: #a01818; }")
+        self.solo_2d.setToolTip(_tr("Marcada: la figura se queda plana (no pasa a Empujar)."))
+        self.solo_2d.setFocusPolicy(Qt.NoFocus)
+        self.solo_2d.hide()
+        self._al_2d = None
+        self.solo_2d.toggled.connect(lambda v: self._al_2d(v) if self._al_2d is not None else None)
+        cabeza.addWidget(self.solo_2d)
         self.boton_calc = QToolButton()
         self.boton_calc.setIcon(_icono_calculadora())
         self.boton_calc.setIconSize(QSize(18, 18))
@@ -373,6 +390,15 @@ class Medidas(QWidget):
         self.calc.hide()
         lay.addWidget(self.calc)
         self._activo: _Renglon | None = None
+
+    def poner_2d(self, visible: bool, marcada: bool, al_cambiar) -> None:
+        """La casilla «Solo 2D» del título (solo con las bases que se empujan)."""
+        self._al_2d = None
+        if self.solo_2d.isChecked() != bool(marcada):
+            self.solo_2d.setChecked(bool(marcada))
+        self._al_2d = al_cambiar
+        if self.solo_2d.isVisible() != bool(visible):
+            self.solo_2d.setVisible(bool(visible))
 
     # -- calculadora --
     def _crear_calculadora(self) -> QWidget:
@@ -429,7 +455,7 @@ class Medidas(QWidget):
             y = p.y() + DEBAJO_DEL_LAPIZ
         x = max(zona.left(), min(x, zona.right() - w))
         y = max(zona.top(), min(y, zona.bottom() - h))
-        self.move(x, y)
+        mover_a(self, x, y)
 
     def _ajustar(self) -> None:
         """Al tamaño justo y junto al cursor. Qt rehace la disposición una
@@ -628,7 +654,7 @@ class Medidas(QWidget):
         vigia.pedir(fila, seguir=True, al_cambiar=self._pintar_micro)
 
     def a_dictado(self, vaciar: bool = False) -> None:
-        """El teclado a la casilla y el dictado de Windows escuchando.
+        """El teclado a la casilla y el dictado del sistema escuchando.
         ``vaciar``: un punto nuevo, lo escrito para el anterior ya no vale."""
         if not self.isVisible() or not self.renglones:
             return

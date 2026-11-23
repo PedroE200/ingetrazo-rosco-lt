@@ -21,6 +21,8 @@ sueltas, ya transformadas — lo mismo que hace Rotar con Ctrl.
 """
 from __future__ import annotations
 
+from ._ajustes import atributo
+
 from ._idioma import _tr
 import logging
 import math
@@ -542,12 +544,12 @@ class Alinear:
                               + _tr("  (Esc = borrar, Ctrl = mover/copiar)"), 8000)
 
     # -- panel de respaldo (esquina superior izquierda del visor) --
-    # Con la barra de modificar, las opciones van en su submenú, encima del
+    # Con la barra del arco de modificar, las opciones van en su submenú, encima del
     # semicírculo; este panel solo sale si no está (o está oculta).
-    def _en_barra_modificar(self) -> bool:
-        if getattr(self.app.window, "_rosco_lt_barra_dibujo", None):
+    def _en_arco_modificar(self) -> bool:
+        if getattr(self.app.window, atributo("anillos"), None):
             return True                  # las opciones van en el submenú del rosco
-        barras = getattr(self.app.window, "_rosco_lt_barra_modificar", None) or {}
+        barras = getattr(self.app.window, atributo("arcos"), None) or {}
         return any(getattr(b, "submenu_visible", False) for b in barras.values())
 
     def _panel(self):
@@ -558,8 +560,8 @@ class Alinear:
                 "escalar": QRectF(x + 150.0, y + 30.0, 130.0, 22.0)}
 
     def clic_panel(self, viewport, screen) -> bool:
-        if self._en_barra_modificar():
-            return False                 # sus clics los toma la barra de modificar
+        if self._en_arco_modificar():
+            return False                 # sus clics los toma el arco de modificar
         g = self._panel()
         p = QPointF(screen)
         if not g["marco"].contains(p):
@@ -573,8 +575,8 @@ class Alinear:
         return True                      # el panel no es un punto
 
     def dibujar(self, viewport, painter) -> None:
-        if self._en_barra_modificar():
-            return                       # el submenú de la barra de modificar ya lo muestra
+        if self._en_arco_modificar():
+            return                       # el submenú del arco de modificar ya lo muestra
         painter.setRenderHint(QPainter.Antialiasing)
         f = QFont(painter.font())
         f.setPointSizeF(8.5)

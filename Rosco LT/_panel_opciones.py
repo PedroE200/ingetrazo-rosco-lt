@@ -6,19 +6,19 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QAbstractButton, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget,
     QPushButton, QRadioButton, QSlider, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import _seleccion
+from . import _edicion, _seleccion
 from ._idioma import _tr
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.opciones")
+from ._ajustes import registro
 
-
+log = registro("opciones")
 class ComboTemas(QComboBox):
     """El desplegable de temas: al pasar el ratón por cada uno, al lado de
     la lista sale la imagen del rosco con ese tema (como el menú de antes)."""
@@ -113,6 +113,15 @@ QPushButton#apagar:hover {{ background: #fcebeb; }}
 QComboBox {{ border: 1px solid #c9c6e8; border-radius: 6px; padding: 3px 8px; background: white;
              color: #2b2b30; min-width: 120px; }}
 QComboBox::drop-down {{ border: none; width: 18px; }}
+QPushButton#pestana {{ color: #555; padding: 4px 12px; }}
+QPushButton#pestana:checked {{ background: {ACENTO}; border-color: {ACENTO_OSCURO}; color: white;
+                              font-weight: 600; }}
+QScrollArea#zona_ayuda {{ background: transparent; border: none; }}
+QScrollBar:vertical {{ background: transparent; width: 8px; margin: 0; }}
+QScrollBar::handle:vertical {{ background: #c9c6e8; border-radius: 4px; min-height: 24px; }}
+QScrollBar::handle:vertical:hover {{ background: {ACENTO}; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
 """
 
 
@@ -142,8 +151,22 @@ class Interruptor(QAbstractButton):
         p.end()
 
 
+def _panel_ayuda():
+    """La ayuda (solo si la edición la lleva; sin ella no hay sección Ayuda
+    ni ayuda junto a los clics)."""
+    if not _edicion.con("panel_ayuda"):
+        raise RuntimeError("esta edición no lleva la ayuda")
+    from . import _panel_ayuda as ayuda
+    return ayuda
+
+
 class PanelOpciones(QWidget):
-    SECCIONES = ("Clics", "Órdenes", "Dictado", "Aspecto", "Guardar", "Apagar")
+    SECCIONES = ("Clics", "Órdenes", "Dictado", "Aspecto", "Guardar", "Ayuda")
+    if not _edicion.con("panel_ayuda"):
+        SECCIONES = SECCIONES[:-1]
+    TAMANO = (480, 400)
+    TAMANOS = {"Ayuda": (640, 600)}        # la que necesita más sitio para leerse
+    AYUDA_CLICS_W = 440                    # el panel lateral de la ayuda de los clics
 
     def __init__(self, cadena, pagina: int = 0) -> None:
         super().__init__(cadena.app.window, Qt.Tool | Qt.FramelessWindowHint)
@@ -176,14 +199,17 @@ class PanelOpciones(QWidget):
         derecha.addWidget(self._fila_fijar())
         self.paginas = QStackedWidget()
         for hacer in (self._p_clics, self._p_ordenes, self._p_dictado, self._p_aspecto,
-                      self._p_guardar, self._p_apagar):
+                      self._p_guardar, self._p_ayuda)[:len(self.SECCIONES)]:
             self.paginas.addWidget(hacer())
         derecha.addWidget(self.paginas, 1)
         cuerpo.addLayout(derecha, 1)
         col.addLayout(cuerpo, 1)
         self.lista.currentRowChanged.connect(self.paginas.setCurrentIndex)
+        self.lista.currentRowChanged.connect(self._ajustar_tamano)
         self.lista.setCurrentRow(max(0, min(pagina, len(self.SECCIONES) - 1)))
-        self.resize(480, 400)
+        self._ajustar_tamano(self.lista.currentRow())
+        for campo in (*self.findChildren(QComboBox), *self.findChildren(QSlider)):
+            campo.installEventFilter(self)
 
     # -- piezas --
     def _cabecera(self) -> QWidget:
@@ -282,18 +308,64 @@ class PanelOpciones(QWidget):
 
     # -- páginas --
     def _p_clics(self) -> QWidget:
-        w, col = self._pagina()
-        col.addWidget(self._seccion(_tr("Con Seleccionar, sin nada seleccionado")))
+        """Las opciones de los clics y, al lado, su ayuda con la pantallita
+        animada, entera y sin barra (el panel se ensancha para ella; sin la
+        ayuda en esta edición, solo las opciones)."""
+        w = QWidget()
+        fila = QHBoxLayout(w)
+        fila.setContentsMargins(0, 0, 0, 0)
+        fila.setSpacing(10)
+        izq, col = self._pagina()
+        col.addWidget(self._seccion(_tr("Botón izquierdo")))
         for clave, texto in _seleccion.OPCIONES:
             col.addWidget(self._interruptor_opcion(clave, _tr(texto)))
-        col.addWidget(self._seccion(_tr("Así quedan los clics")))
-        nota = QLabel(_tr("Izquierdo: hacer o elegir. Derecho: menú, terminar o volver atrás. "
-                          "Doble: otra vez o cancelar. Doble clic en el centro del rosco: repetir."))
+        col.addWidget(self._seccion(_tr("Botón derecho")))
+        for clave, texto in _seleccion.DERECHO:
+            col.addWidget(self._interruptor_opcion(clave, _tr(texto)))
+        nota = QLabel(_tr("A la derecha, qué hace cada clic: pasa el ratón por una fila y la "
+                          "pantallita enseña ese gesto."))
         nota.setObjectName("nota")
         nota.setWordWrap(True)
+        if not _edicion.con("panel_ayuda"):
+            nota.setText(_tr("Izquierdo: hacer o elegir. Derecho: el rosco, terminar o volver atrás. "
+                             "Doble: otra vez o cancelar."))
         col.addWidget(nota)
         col.addStretch(1)
+        fila.addWidget(izq, 1)
+        if not _edicion.con("panel_ayuda"):
+            return w
+        Lienzo = _panel_ayuda().Lienzo
+        lado = QFrame()
+        lado.setObjectName("ayuda_lado")
+        lado.setStyleSheet("QFrame#ayuda_lado { background: #fbfbfa; border-left: 1px solid #e3e1ee; }")
+        caja = QVBoxLayout(lado)
+        caja.setContentsMargins(6, 2, 0, 0)
+        caja.setSpacing(2)
+        caja.addWidget(self._seccion(_tr("Ayuda de los clics")))
+        self.puntos_ayuda = self._puntos_que_caben()
+        self.ayuda_clics = Lienzo(puntos=self.puntos_ayuda)
+        self.ayuda_clics.setFixedWidth(self.AYUDA_CLICS_W)
+        caja.addWidget(self.ayuda_clics, 1)
+        fila.addWidget(lado)
         return w
+
+    def _puntos_que_caben(self) -> float:
+        """La letra de la ayuda de los clics: la mayor (hasta 8,5) con la
+        que cabe entera en la pantalla."""
+        alto_para = _panel_ayuda().alto_para
+        try:
+            libre = self.cadena.app.window.screen().availableGeometry().height() - 120
+        except Exception:  # noqa: BLE001
+            libre = 900
+        for puntos in (8.5, 8.0, 7.5, 7.0, 6.5):
+            if alto_para(self.AYUDA_CLICS_W, puntos) <= libre:
+                return puntos
+        return 6.5
+
+    def _tamano_clics(self) -> tuple:
+        alto_para = _panel_ayuda().alto_para
+        alto = alto_para(self.AYUDA_CLICS_W, getattr(self, "puntos_ayuda", 8.5))
+        return (self.TAMANO[0] + self.AYUDA_CLICS_W + 20, max(self.TAMANO[1], alto + 100))
 
     def _p_ordenes(self) -> QWidget:
         w, col = self._pagina()
@@ -303,6 +375,12 @@ class PanelOpciones(QWidget):
         col.addWidget(self._seccion(_tr("Mantener pulsado un botón")))
         for clave, texto in _seleccion.PULSACION:
             col.addWidget(self._interruptor_opcion(clave, _tr(texto)))
+        for titulo, lista in (("Teclado", _seleccion.TECLADO), ("Vista previa", _seleccion.VISTA)):
+            if not lista:                    # sin casillas en esta edición
+                continue
+            col.addWidget(self._seccion(_tr(titulo)))
+            for clave, texto in lista:
+                col.addWidget(self._interruptor_opcion(clave, _tr(texto)))
         col.addStretch(1)
         return w
 
@@ -395,20 +473,9 @@ class PanelOpciones(QWidget):
         col.addStretch(1)
         return w
 
-    def _p_apagar(self) -> QWidget:
-        w, col = self._pagina()
-        col.addWidget(self._seccion("Rosco LT"))
-        nota = QLabel(_tr("Lo apaga al momento. Para volver: el interruptor de la barra "
-                          "«Rosco LT» o Extensiones ▸ Rosco LT."))
-        nota.setObjectName("nota")
-        nota.setWordWrap(True)
-        col.addWidget(nota)
-        b = QPushButton(_tr("Desactivar Rosco LT"))
-        b.setObjectName("apagar")
-        b.clicked.connect(self._apagar)
-        col.addWidget(b)
-        col.addStretch(1)
-        return w
+    def _p_ayuda(self) -> QWidget:
+        PaginaAyuda = _panel_ayuda().PaginaAyuda
+        return PaginaAyuda()
 
     # -- acciones --
     def _poner_submenus(self, clave: str) -> None:
@@ -431,13 +498,26 @@ class PanelOpciones(QWidget):
         QTimer.singleShot(0, lambda: abrir(self.cadena, None, pos, pagina))
         self.close()
 
-    def _apagar(self) -> None:
-        interruptor = getattr(self.cadena.app.window, "_rosco_lt_interruptor", None)
-        self.close()
-        if interruptor is not None:
-            QTimer.singleShot(0, interruptor.apagar)
-
     # -- ventana --
+    def eventFilter(self, obj, ev) -> bool:  # noqa: N802
+        """La rueda del ratón no cambia los valores de los campos."""
+        return ev.type() == QEvent.Type.Wheel or super().eventFilter(obj, ev)
+
+    def _ajustar_tamano(self, fila: int) -> None:
+        """Cada sección con su tamaño, sin salirse de la pantalla."""
+        seccion = self.SECCIONES[fila] if 0 <= fila < len(self.SECCIONES) else None
+        if seccion == "Clics" and _edicion.con("panel_ayuda"):
+            self.resize(*self._tamano_clics())
+        else:
+            self.resize(*self.TAMANOS.get(seccion, self.TAMANO))
+        if self.isVisible():
+            self.dentro_de_pantalla()
+
+    def dentro_de_pantalla(self) -> None:
+        g = self.screen().availableGeometry()
+        self.move(max(g.left(), min(self.x(), g.right() + 1 - self.width())),
+                  max(g.top(), min(self.y(), g.bottom() + 1 - self.height())))
+
     def _empezar_arrastre(self, ev) -> None:
         if ev.button() == Qt.LeftButton:
             self._arrastre = ev.globalPosition().toPoint() - self.pos()
@@ -478,5 +558,6 @@ def abrir(cadena, global_pos, pos_exacta: QPoint | None = None, pagina: int = 0)
         y = min(max(pantalla.top(), global_pos.y()), pantalla.bottom() - panel.height())
         panel.move(x, y)
     panel.show()
+    panel.dentro_de_pantalla()
     panel.raise_()
     panel.activateWindow()

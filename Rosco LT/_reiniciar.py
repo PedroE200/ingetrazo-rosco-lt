@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Reiniciar (pieza de Rosco LT) — cierra y vuelve a abrir IngeTrazo con un
+"""Reiniciar (pieza de Rosco) — cierra y vuelve a abrir IngeTrazo con un
 clic.
 
 Pensado para desarrollar extensiones: IngeTrazo solo escanea los plugins al
@@ -11,11 +11,13 @@ arrancar, así que cada cambio pide un reinicio.
    y lo vuelve a lanzar.
 3. Si el documento tenía archivo (o se acaba de guardar), se reabre.
 
-Se lanza desde la barra de herramientas «Rosco LT» (icono de flecha
-circular), desde Extensiones ▸ Rosco LT ▸ Reiniciar IngeTrazo o con
+Se lanza desde la barra de herramientas «Rosco» (icono de flecha
+circular), desde Extensiones ▸ Rosco ▸ Reiniciar IngeTrazo o con
 Ctrl+Alt+R (si el atajo está libre).
 """
 from __future__ import annotations
+
+from ._ajustes import atributo
 
 from ._idioma import _tr
 import logging
@@ -31,6 +33,24 @@ log = logging.getLogger("ingetrazo.plugins.reiniciar")
 
 ACCENT = "#f37329"
 _ICONO_SVG = os.path.join(os.path.dirname(__file__), "icons", "reiniciar.svg")
+
+# ---- Idiomas --------------------------------------------------------------------
+
+_TEXTS = {
+    "es": {
+        "Restart IngeTrazo": "Reiniciar IngeTrazo",
+        "Close and reopen IngeTrazo (asks to save first).":
+            "Cierra y vuelve a abrir IngeTrazo (antes pregunta si guardar).",
+        "Restart cancelled.": "Reinicio cancelado.",
+        "Could not restart: {err}": "No se pudo reiniciar: {err}",
+    },
+}
+
+
+def _t(text: str, **kw) -> str:
+    es = _TEXTS["es"].get(text, text)
+    return _tr(es).format(**kw) if kw else _tr(es)
+
 
 # ---- Reinicio ---------------------------------------------------------------------
 
@@ -108,7 +128,7 @@ def reiniciar(app) -> None:
     # close() pasa por el closeEvent de IngeTrazo: pregunta si guardar y guarda
     # la posición de las barras. Devuelve False si el usuario cancela.
     if not win.close():
-        app.viewport.flash_status(_tr("Reinicio cancelado."), 4000)
+        app.viewport.flash_status(_tr(_t("Restart cancelled.")), 4000)
         return
     # Se lee después de cerrar: «Guardar como» en el aviso pudo darle ruta.
     documento = getattr(win, "_current_path", None)
@@ -118,7 +138,7 @@ def reiniciar(app) -> None:
     except Exception as err:  # noqa: BLE001
         log.exception("no se pudo lanzar el reinicio")
         win.show()
-        app.viewport.flash_status(_tr("No se pudo reiniciar: {err}").format(err=err), 8000)
+        app.viewport.flash_status(_tr(_t("Could not restart: {err}", err=err)), 8000)
         return
     log.info("reiniciando IngeTrazo (documento: %s)", documento)
     QApplication.quit()
@@ -127,7 +147,7 @@ def reiniciar(app) -> None:
 # ---- Icono y barra de herramientas ------------------------------------------------
 
 def _icono_barra(window) -> QIcon:
-    """El botón de la barra «Rosco LT»: la flecha en baldosa (``_baldosa``);
+    """El botón de la barra «Rosco»: la flecha en baldosa (``_baldosa``);
     si falla, la de siempre."""
     try:
         from . import _baldosa
@@ -186,13 +206,13 @@ def _icono_a_mano(tinta) -> QIcon:
     return QIcon(pm)
 
 
-# ---- Instalación (la llama el setup de Rosco LT) ----------------------------------
+# ---- Instalación (la llama el setup de Rosco) ----------------------------------
 
 def instalar(app) -> None:
     from ._barra import anadir
     from ._interruptor import apuntar, entrada
-    titulo = "Reiniciar IngeTrazo"
-    tip = "Cierra y vuelve a abrir IngeTrazo (antes pregunta si guardar)."
+    titulo = _t("Restart IngeTrazo")
+    tip = _t("Close and reopen IngeTrazo (asks to save first).")
 
     apuntar(app, entrada(app, "reiniciar", titulo, lambda: reiniciar(app), tip,
                          shortcut="Ctrl+Alt+R"), titulo)
@@ -202,7 +222,7 @@ def instalar(app) -> None:
         accion.setToolTip(_tr(tip))
         accion.setStatusTip(_tr(tip))
         accion.triggered.connect(lambda _checked=False: reiniciar(app))
-        accion._rosco_lt_siempre = True        # sigue en la barra con Rosco LT apagado
+        setattr(accion, atributo("siempre"), True)   # sigue en la barra con Rosco apagado
         anadir(app, accion)
     except Exception:  # noqa: BLE001 — el menú sigue funcionando
         log.exception("no se pudo poner el botón en la barra")

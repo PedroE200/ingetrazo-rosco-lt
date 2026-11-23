@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""La ventana de las listas de tareas (pieza de Rosco LT):
+"""La ventana de las listas de tareas (pieza de Rosco):
 
 - Pestañas arriba (Tareas del modelo · Tareas de IngeTrazo) para pasar a
   la otra lista, banda degradada y tarjeta blanca con el nombre en grande,
@@ -47,9 +47,10 @@ from PySide6.QtWidgets import (
 
 from . import _datos, _iconos
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt")
+from .._ajustes import CLAVE, atributo, registro
 
-MIME = "application/x-rosco-lt-tarea"
+log = registro("tareas")
+MIME = f"application/x-{CLAVE.replace('_', '-')}-tarea"
 FUENTE = "Segoe UI"
 FONDO = "#F0F0F0"              # ventana y pie
 LATERAL = "#E9E9E9"            # columna de botones
@@ -119,7 +120,7 @@ AYUDA = ("Tarea nueva: los dos primeros cuadros de la columna (arriba o abajo de
          "Con una tarea seleccionada, la columna la borra, la sube o la baja.\n"
          "«N tareas hechas»: pliega o despliega las hechas.\n"
          "Buscador: deja ver solo las tareas que contienen lo escrito.\n"
-         "Micrófono: dictado de Windows. Escribiendo una tarea, sigue la frase en ella; "
+         "Micrófono: dictado del sistema. Escribiendo una tarea, sigue la frase en ella; "
          "si no, crea una tarea nueva arriba de la lista.\n"
          "Pestañas de arriba: pasan a la otra lista.")
 
@@ -305,7 +306,7 @@ class _Texto(QTextEdit):
     def wheelEvent(self, ev) -> None:
         ev.ignore()                      # la rueda mueve la lista, no la tarea
 
-    # -- dictado de Windows: en Qt llega sin ver el texto de alrededor, así que
+    # -- dictado del sistema: en Qt llega sin ver el texto de alrededor, así que
     #    no separa con espacio ni sabe si va en mitad de una frase.
     def _dictando(self) -> bool:
         return self.fila.ventana._dictando == self.fila.id
@@ -660,8 +661,8 @@ class VentanaTareas(QDialog):
             self._paleta.setColor(rol, QColor(color))
         self.setPalette(self._paleta)
         self.setAutoFillBackground(True)
-        self.setObjectName("rosco_lt_tareas")      # colores fijos, aunque IngeTrazo vaya en oscuro
-        self.setStyleSheet(f"#rosco_lt_tareas{{background:{FONDO};}}"
+        self.setObjectName(f"{CLAVE}_tareas")      # colores fijos, aunque IngeTrazo vaya en oscuro
+        self.setStyleSheet(f"#{CLAVE}_tareas{{background:{FONDO};}}"
                            "QToolTip{color:#222;background:#FFFFE8;border:1px solid #BBB;}")
         self._marco = QVBoxLayout(self)
         self._marco.setContentsMargins(0, 0, 0, 0)
@@ -965,7 +966,7 @@ class VentanaTareas(QDialog):
 
     def _reloj(self) -> None:
         """Abre (o cierra) el panel del Reloj de la barra, junto a esta ventana."""
-        cadena = (getattr(self.app.window, "_rosco_lt_barra_dibujo", None) or {}).get("rosco_lt")
+        cadena = (getattr(self.app.window, atributo("anillos"), None) or {}).get(CLAVE)
         abrir = getattr(cadena, "abrir_tiempo_junto", None)
         if callable(abrir):
             abrir(self)
@@ -979,7 +980,7 @@ class VentanaTareas(QDialog):
         b.setFixedSize(30, 30)
         b.setFocusPolicy(Qt.NoFocus)           # que no le quite el foco a la tarea
         b.setCursor(Qt.PointingHandCursor)
-        b.setToolTip(_tr("Entrada por voz (dictado de Windows)\n"
+        b.setToolTip(_tr("Entrada por voz (dictado del sistema)\n"
                      "Escribiendo una tarea: sigue la frase en esa tarea.\n"
                      "Si no: crea una tarea nueva arriba de la lista.\n"
                      "Mientras dictas, púlsalo otra vez para dar la tarea por escrita."))
@@ -1046,10 +1047,10 @@ class VentanaTareas(QDialog):
             u.keybd_event(h, 0, 0, 0)
             u.keybd_event(h, 0, suelta, 0)
             u.keybd_event(win, 0, suelta, 0)
-        except Exception:  # noqa: BLE001 — sin Windows o sin user32
-            log.exception("Tareas: no se pudo abrir el dictado de Windows")
+        except Exception:  # noqa: BLE001 — fuera de este sistema o sin user32
+            log.exception("Tareas: no se pudo abrir el dictado del sistema")
             QMessageBox.information(self, _tr("Tareas"),
-                                    _tr("No se pudo abrir el dictado de Windows.\n"
+                                    _tr("No se pudo abrir el dictado del sistema.\n"
                                     "Pulsa Win + H con el cursor en la tarea."))
 
     def _ayuda(self) -> None:

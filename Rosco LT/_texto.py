@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""El Texto de Rosco LT: bloques de texto (planos o con grosor) que se
+"""El Texto de Rosco: bloques de texto (planos o con grosor) que se
 apoyan en la cara bajo el ratón y se pueden volver a editar.
 
 Opciones de un bloque (``DEFECTO``): texto; letra, negrita y cursiva; tamaño
@@ -20,7 +20,7 @@ El bloque queda como un grupo «Texto: …» con sus parámetros en
 from __future__ import annotations
 
 from ._ajustes import ext_al_dia
-from ._idioma import _tr
+from ._idioma import con_nombre, _tr
 import json
 import logging
 import math
@@ -37,8 +37,9 @@ from PySide6.QtWidgets import (
 
 from tools.base import Tool, ToolContext
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.texto")
+from ._ajustes import registro
 
+log = registro("texto")
 CLAVE = "rosco"
 PT = 100.0                                    # tamaño de la letra al componer (unidades de fuente)
 ESCALAS = ("1/10", "1/20", "1/50", "1/100", "1/200", "1/500")
@@ -411,7 +412,7 @@ def contorno(params: dict, marco: tuple) -> list:
 
 # ---- la herramienta ---------------------------------------------------------------
 class Texto(Tool):
-    name = "Rosco LT · texto"
+    name = con_nombre("Rosco · texto")
     icon = "text"
     description = "Text blocks that sit on the face under the cursor and can be edited later."
     uses_snap = True
@@ -513,19 +514,24 @@ class Texto(Tool):
         self.colocar(vp, marco)
 
     def on_double_click(self, ctx: ToolContext) -> None:
-        vp = ctx.viewport
+        self.editar_en(ctx.viewport, ctx.screen.x(), ctx.screen.y())
+
+    def editar_en(self, vp, x, y) -> bool:
+        """Si en ``(x, y)`` del visor hay un texto, lo selecciona para
+        editarlo. True = había uno."""
         try:
-            g = vp.pick_group(ctx.screen.x(), ctx.screen.y())
+            g = vp.pick_group(x, y)
         except Exception:  # noqa: BLE001
             g = None
         while g is not None and es_texto(g) is None:
             g = getattr(g, "owner", None)
         if g is None:
-            return
+            return False
         vp.scene.select([g], mode="replace")
         self._mirar_seleccion(vp)
         vp.notify_scene_changed()
         vp.flash_status(_tr(self._ayuda()), 6000)
+        return True
 
     def rubber_band_lines(self):
         return [] if self.editando else list(self._vista)
@@ -675,8 +681,8 @@ def _guardar_ultimos(p: dict) -> None:
 
 # ---- el panel ----------------------------------------------------------------------
 _ESTILO = """
-QFrame#rosco_lt_texto { background: #ffffff; border: 1.5px solid #4b3aa8; border-radius: 8px; }
-QFrame#rosco_lt_texto QLabel { color: #222; background: transparent; font-size: 8.5pt; }
+QFrame#rosco_texto { background: #ffffff; border: 1.5px solid #4b3aa8; border-radius: 8px; }
+QFrame#rosco_texto QLabel { color: #222; background: transparent; font-size: 8.5pt; }
 QLabel#titulo { font-weight: bold; color: #4b3aa8; }
 QLabel#seccion { color: #777; font-size: 7.5pt; }
 QLineEdit, QPlainTextEdit, QComboBox, QDoubleSpinBox, QSpinBox, QFontComboBox {
@@ -707,7 +713,7 @@ class PanelTexto(QFrame):
         super().__init__(ventana, Qt.Tool | Qt.FramelessWindowHint)
         # Fondo opaco y colores propios: con el tema oscuro de IngeTrazo, la
         # ventana transparente salía negra y las letras no se veían.
-        self.setObjectName("rosco_lt_texto")
+        self.setObjectName("rosco_texto")
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setAutoFillBackground(True)
         claro = QPalette()

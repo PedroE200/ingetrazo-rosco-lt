@@ -6,6 +6,7 @@ hueco libre y Esc o ✕ la cierran. Las cuentas, como las de la ventanita de
 medidas (``_medidas.calcular``)."""
 from __future__ import annotations
 
+from ._flotante import mover_a
 from ._idioma import _tr
 from PySide6.QtCore import QPoint, QSize, Qt, QTimer
 from PySide6.QtWidgets import (
@@ -94,7 +95,7 @@ class Calculadora(_Arrastrable, QFrame):
 
     def mostrar(self, pos: QPoint) -> None:
         self.pantalla._unidad.poner(unidad_doc())   # la del dibujo abierto
-        self.move(pos)
+        mover_a(self, pos)
         self.show()
         self.raise_()
         self.activateWindow()

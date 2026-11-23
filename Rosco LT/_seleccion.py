@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""La mitad de abajo del anillo de Rosco LT: modificar lo seleccionado. Está
+"""La mitad de abajo del anillo de Rosco: modificar lo seleccionado. Está
 siempre a la vista, debajo del cursor (la de arriba es la de dibujar).
 
     arco de fuera ... Suprimir · Agrupar · Cortar · Copiar · Invertir cara
-    arco de dentro .. Desplazar · Escalar · Simetría · Rotar (los de la barra de modificar)
+    arco de dentro .. Desplazar · Escalar · Simetría · Rotar (los del arco de modificar)
 
-Los del arco de dentro activan las herramientas como la barra de modificar, con sus
+Los del arco de dentro activan las herramientas como el arco de modificar, con sus
 submenús (mover · copia · alinear · empujar/tirar; libre · por referencia;
 sin copia · con copia); la barra sigue mientras la herramienta espera su
 primer punto. Agrupar abre su submenú: grupo, con nombre, componente,
@@ -19,11 +19,11 @@ seleccionado, lo quita; un clic en el vacío deja la selección vacía. La
 ventana y el lazo añaden.
 
 Y en el Seleccionar de IngeTrazo, sin nada seleccionado (Opciones): un clic
-en el vacío abre la barra de dibujo y un doble clic repite el último comando.
+en el vacío abre el anillo y un doble clic repite el último comando.
 """
 from __future__ import annotations
 
-from ._idioma import _tr
+from ._idioma import con_nombre, _tr
 import dataclasses
 import logging
 
@@ -32,15 +32,17 @@ from PySide6.QtWidgets import QApplication, QInputDialog
 
 from . import _interruptor
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.anillo")
+from ._ajustes import atributo, registro
 
+log = registro("anillo")
 # De izquierda a derecha, como se leen debajo del cursor.
 BANDA = ("suprimir", "agrupar", "cortar", "copiar", "invertir")
 SEMI = ("move", "scale", "flip", "rotate")
 AGRUPAR = ("grupo", "con nombre", "componente", "desagrupar")
 # Los botoncitos pegados debajo del arco: ángulo (0 = derecha, 270 = abajo).
 CHICOS = {"opciones": 250.0, "ocultar": 270.0, "bloquear": 290.0}
-NOMBRES = {"move": "Desplazar: mover · copia · alinear · empujar/tirar · vértices",
+from . import _edicion  # noqa: E402
+NOMBRES = {"move": "Desplazar: mover · copia · alinear · estirar · vértices",
            "scale": "Escalar: libre · por referencia", "flip": "Simetría",
            "rotate": "Rotar: sin copia · con copia",
            "suprimir": "Suprimir la selección", "ocultar": "Ocultar la selección",
@@ -50,19 +52,35 @@ NOMBRES = {"move": "Desplazar: mover · copia · alinear · empujar/tirar · vé
            "bloquear": "Bloquear / desbloquear (grupos y componentes)",
            "opciones": "Opciones: clic y doble clic en vacío",
            "propiedades": "Abrir Info de entidad"}
+NOMBRES = _edicion.limpiar(NOMBRES)                   # sin lo de las partes que faltan
+# Botón izquierdo (Opciones ▸ Clics). «clic_anillo» (clic en vacío: abrir la
+# barra) se quitó en la 2.48.2: el izquierdo nunca abre el rosco.
 OPCIONES = (("doble_repite", "Doble clic en vacío: repetir el último comando"),
-            ("clic_barra_dibujo", "Clic en vacío: abrir la barra"),
             ("doble_cierra", "Doble clic rápido con la barra a la vista: cerrarla"))
+# 2.49.3: «derecho_sostenido» (el aro) se retira: los programas de
+# gestos del ratón retienen el derecho mientras se mantiene pulsado.
+RETIRADAS = frozenset({"clic_anillo", "derecho_sostenido"})
+# La vista previa del subrosco al pararse sobre un botón (encendida de serie).
+VISTA = (("vista_previa", "Al pararse sobre un botón: abrir su subrosco, pequeño y pegado a él"),)
+# Botón derecho (Opciones ▸ Clics), encendidas de serie.
+DERECHO = (("derecho_rosco", "Clic en vacío: mostrar u ocultar el rosco · sobre un objeto: menú de IngeTrazo"),
+           ("triple_derecho", "Triple clic rápido: apagar o encender Rosco"))
 # Tras cada orden de la barra (salvo Seleccionar) queda Seleccionar y la barra
 # no vuelve hasta un clic en el vacío o una selección.
 TRAS_ORDEN = (("esconder_tras", "Esconder la barra tras cada orden (salvo Seleccionar)"),)
 # Mantener pulsado un botón de la barra (o arrastrar con él pulsado).
-PULSACION = (("pulsacion_ver", "Esconder la barra para ver el modelo mientras se pulsa o se arrastra"),)
-# Tras el primer punto, además de la ventanita de medidas, el dictado de Windows.
+PULSACION = (("pulsacion_ver", "Esconder la barra para ver el modelo mientras se pulsa o se arrastra"),
+             ("pulsacion_voz", "Órdenes por voz mientras se mantiene pulsado"))
+# Tras el primer punto, además de la ventanita de medidas, el dictado del sistema.
 DICTADO = (("dictado_dibujo", "Órdenes de dibujo: dictar la medida tras el primer punto"),
            ("dictado_edicion", "Órdenes de edición (desplazar, rotar, escalar…): "
                                "dictar la medida tras el primer punto"))
 APAGADAS_DE_SERIE = frozenset(clave for clave, _texto in DICTADO)
+# Solo las casillas de esta edición (``_edicion``).
+OPCIONES, VISTA, DERECHO, PULSACION = (_edicion.opciones(OPCIONES), _edicion.opciones(VISTA),
+                                       _edicion.opciones(DERECHO), _edicion.opciones(PULSACION))
+# El teclado: dos toques seguidos en Bloq Mayús (``_interruptor``).
+TECLADO = _edicion.opciones((("doble_bloq", "Doble toque rápido en Bloq Mayús: encender o apagar Rosco"),))
 _TECLAS = Qt.ShiftModifier | Qt.ControlModifier
 
 
@@ -73,7 +91,20 @@ def _ajustes() -> QSettings:
     return ajustes()
 
 
+def migrar_derecho_248() -> None:
+    """Una sola vez (2.48.0, reparto de clics «A»): el clic derecho maneja el
+    rosco, así que el izquierdo en el vacío vuelve a ser el de IngeTrazo
+    (quita la selección). Se puede volver a encender en Opciones."""
+    s = _ajustes()
+    if s.value("migraciones/derecho_248"):
+        return
+    s.setValue("seleccionar/clic_anillo", False)
+    s.setValue("migraciones/derecho_248", True)
+
+
 def opcion(clave: str) -> bool:
+    if clave in RETIRADAS or not _edicion.opcion(clave):
+        return False
     valor = _ajustes().value(f"seleccionar/{clave}", clave not in APAGADAS_DE_SERIE)
     if isinstance(valor, str):
         return valor.strip().lower() in ("1", "true")
@@ -313,7 +344,7 @@ def menu_opciones(cadena, global_pos) -> None:
         a.setChecked(opcion(clave))
         a.setData(clave)
     m.addSection(_tr("Tamaño de la barra"))
-    m.addAction(_tr(_accion_escala(cadena, m)))
+    m.addAction(_accion_escala(cadena, m))
     m.addSection(_tr("Submenús de las órdenes"))
     formas = QActionGroup(m)
     formas.setExclusive(True)
@@ -323,9 +354,9 @@ def menu_opciones(cadena, global_pos) -> None:
         a.setCheckable(True)
         a.setChecked(clave == actual)
         a.setData(("submenus", clave))
-        formas.addAction(_tr(a))
-    m.addAction(_tr(_accion_distancia(cadena, m)))
-    m.addAction(_tr(_accion_escala_rosco(cadena, m)))
+        formas.addAction(a)
+    m.addAction(_accion_distancia(cadena, m))
+    m.addAction(_accion_escala_rosco(cadena, m))
     # El tema, en un desplegable: una línea con el actual y, al pasar, la
     # lista de temas al lado (con la vista previa de cada uno).
     m.addSection(_tr("Aspecto"))
@@ -339,7 +370,7 @@ def menu_opciones(cadena, global_pos) -> None:
         a.setChecked(t.clave == cadena.tema.clave)
         a.setToolTip(_tr(t.descripcion))
         a.setData(("tema", t.clave))
-        grupo.addAction(_tr(a))
+        grupo.addAction(a)
     # El idioma, cada uno en el suyo (para que se encuentre aunque no se entienda el actual).
     from . import _idioma
     nombres = dict(_idioma.IDIOMAS)
@@ -355,11 +386,6 @@ def menu_opciones(cadena, global_pos) -> None:
     m.addSection(_tr("Configuración"))
     m.addAction(_tr("Exportar la configuración…")).setData(("exportar",))
     m.addAction(_tr("Importar una configuración…")).setData(("importar",))
-    m.addSection("Rosco LT")
-    apagar = m.addAction(_tr("Desactivar Rosco LT"))
-    apagar.setToolTip(_tr("Lo apaga al momento. Para volver: el interruptor de la barra "
-                      "«Rosco LT» o Extensiones ▸ Rosco LT."))
-    apagar.setData(("desactivar",))
     vista = _VistaPrevia(cadena, temas)
     temas.hovered.connect(vista.mostrar)
     temas.aboutToHide.connect(lambda: vista.mostrar(None))
@@ -384,11 +410,6 @@ def menu_opciones(cadena, global_pos) -> None:
         cadena._pulsar_chincheta(cadena.app.viewport, "chincheta")
     elif isinstance(datos, tuple) and datos[0] in ("exportar", "importar"):
         QTimer.singleShot(0, lambda: _configuracion(cadena, datos[0]))
-    elif isinstance(datos, tuple) and datos[0] == "desactivar":
-        interruptor = getattr(cadena.app.window, "_rosco_lt_interruptor", None)
-        if interruptor is not None:
-            # Fuera del clic de la barra, que aún se está atendiendo.
-            QTimer.singleShot(0, interruptor.apagar)
     elif datos:
         poner_opcion(datos, elegida.isChecked())
         cadena.app.viewport.flash_status(
@@ -403,12 +424,12 @@ def _configuracion(cadena, que: str) -> None:
     from . import _ajustes
     win = cadena.app.window
     carpeta = os.path.join(os.path.expanduser("~"), "Documents")
-    filtro = _tr("Configuración de Rosco LT (*.json)")
+    filtro = _tr("Configuración de Rosco (*.json)")
     try:
         if que == "exportar":
             ruta, _f = QFileDialog.getSaveFileName(
                 win, _tr("Exportar la configuración"),
-                os.path.join(carpeta, "Rosco LT configuración.json"), filtro)
+                os.path.join(carpeta, con_nombre("Rosco configuración.json")), filtro)
             if not ruta:
                 return
             n = _ajustes.exportar(ruta)
@@ -417,7 +438,15 @@ def _configuracion(cadena, que: str) -> None:
             ruta, _f = QFileDialog.getOpenFileName(win, _tr("Importar una configuración"), carpeta, filtro)
             if not ruta:
                 return
+            trae_grupos = _ajustes.comprobar_importacion(ruta)
+            if trae_grupos and cadena.huecos.n_juegos() > 1:
+                r = QMessageBox.question(win, _tr("Importar una configuración"),
+                                         _tr("Importar sustituirá todos tus grupos por los del archivo.\n"
+                                             "¿Continuar?"))
+                if r != QMessageBox.Yes:
+                    return
             n = _ajustes.importar(ruta)
+            cadena.huecos.recargar()
             QMessageBox.information(
                 win, _tr("Importar una configuración"),
                 _tr("Configuración importada ({0} ajustes). Reinicia IngeTrazo para que se "
@@ -431,7 +460,7 @@ def _configuracion(cadena, que: str) -> None:
 
 class ClicVacio:
     """Con el Seleccionar de IngeTrazo, un clic en el vacío (sin nada
-    seleccionado) abre la barra de dibujo y un doble clic en el vacío (con o sin
+    seleccionado) abre el anillo y un doble clic en el vacío (con o sin
     selección) repite el último comando. Para saber cuál de los dos es, el
     clic espera lo que dura un doble clic."""
 
@@ -446,7 +475,7 @@ class ClicVacio:
         self.reloj.setInterval(QApplication.doubleClickInterval())
         self.reloj.timeout.connect(self._clic_solo)
         tool.on_click = self.on_click
-        tool._clic_original = self.original    # sin esto (cerrar la barra de dibujo lo usa)
+        tool._clic_original = self.original    # sin esto (cerrar el anillo lo usa)
 
     def _vacio(self, ctx, con_seleccion=False) -> bool:
         vp = ctx.viewport
@@ -467,10 +496,11 @@ class ClicVacio:
             return False
 
     def on_click(self, ctx):
-        if not _interruptor.ENCENDIDA:
+        if not _interruptor.ENCENDIDA or getattr(self.cadena, "_pasar_clic", False):
+            # Apagada, o el clic que acaba de cerrar el rosco: no es «en el vacío».
             self.reloj.stop()
             return self.original(ctx)
-        doble, clic = opcion("doble_repite"), opcion("clic_barra_dibujo")
+        doble, clic = opcion("doble_repite"), opcion("clic_anillo")
         # Con algo seleccionado cuentan el doble clic (repetir) y, con la
         # barra dormida, el clic (la despierta con esa selección).
         self._dormida_al_clic = bool(getattr(self.cadena, "dormida", False))
@@ -516,19 +546,19 @@ class ClicVacio:
         if previa:
             # Había selección: con la barra dormida, vuelve la barra con lo
             # seleccionado; con la barra a la vista, el clic solo deselecciona.
-            if (_interruptor.ENCENDIDA and opcion("clic_barra_dibujo") and self._dormida_al_clic
+            if (_interruptor.ENCENDIDA and opcion("clic_anillo") and self._dormida_al_clic
                     and vp.active_tool is self.tool and not vp.scene.selection):
                 self.cadena.despertar(previa)
             return
-        if (_interruptor.ENCENDIDA and opcion("clic_barra_dibujo") and vp.active_tool is self.tool
+        if (_interruptor.ENCENDIDA and opcion("clic_anillo") and vp.active_tool is self.tool
                 and not vp.scene.selection):
             self.cadena.activar()
 
 
 def hacer_vacio(cadena, tool) -> None:
-    if tool is None or getattr(tool, "_rosco_lt_vacio", None) is not None:
+    if tool is None or getattr(tool, atributo("vacio"), None) is not None:
         return
-    tool._rosco_lt_vacio = ClicVacio(cadena, tool)
+    setattr(tool, atributo("vacio"), ClicVacio(cadena, tool))
 
 
 # ---- El extracto de propiedades -------------------------------------------------
@@ -620,15 +650,15 @@ def caja_multiple(original):
 
 def hacer_multiple(tool) -> None:
     """Pone la selección múltiple en ``tool`` (una sola vez)."""
-    if tool is None or getattr(tool, "_barra_dibujo_multiple", False):
+    if tool is None or getattr(tool, "_anillo_multiple", False):
         return
     tool.on_click = clic_multiple(tool, tool.on_click)
     tool.on_box_select = caja_multiple(tool.on_box_select)
-    tool._barra_dibujo_multiple = True
+    tool._anillo_multiple = True
 
 
 def modo_lazo(modificadores) -> str:
-    """El lazo de la barra de dibujo, como la ventana: sin teclas, añade."""
+    """El lazo del anillo, como la ventana: sin teclas, añade."""
     from tools.select import selection_mode
     modo = selection_mode(modificadores)
     return "add" if modo == "replace" else modo

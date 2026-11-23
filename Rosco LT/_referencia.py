@@ -13,7 +13,7 @@ menú por cada Tool definida allí.
 """
 from __future__ import annotations
 
-from ._idioma import _tr
+from ._idioma import con_nombre, _tr
 import logging
 
 from PySide6.QtGui import QVector3D
@@ -21,13 +21,14 @@ from PySide6.QtGui import QVector3D
 from core.units import fmt_len
 from tools.base import Tool, ToolContext
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.modificar")
+from ._ajustes import registro
 
+log = registro("modificar")
 _MINIMO = 1e-9
 
 
 class EscalaReferencia(Tool):
-    name = "Rosco LT · escala por referencia"
+    name = con_nombre("Rosco · escala por referencia")
     icon = "scale"
     description = ("Scale the selection uniformly from a point so a "
                    "reference segment gets the length you type.")

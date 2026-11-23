@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" version="1.2" baseProfile="tiny">
-<title>barra_dibujo</title>
+<title>Rosco</title>
 <desc>A box glyph in IngeTrazo's icon style. "currentColor" is replaced by the palette's text colour at load time.</desc>
 <!-- Faces: top in the accent, the two sides lighter, so the box reads at 16 px. -->
 <polygon points="24,5 41,14 24,23 7,14" fill="#f37329" fill-opacity="0.85" stroke="none"/>

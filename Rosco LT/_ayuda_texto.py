@@ -20,8 +20,9 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.texto")
+from ._ajustes import registro
 
+log = registro("texto")
 W, H = 220, 96                                # el dibujo de la tarjeta
 MORADO = QColor("#4b3aa8")
 TINTA = QColor("#222222")
@@ -81,10 +82,6 @@ def _fuente(tam: float, negrita=False, cursiva=False, familia="Segoe UI") -> QFo
 
 
 def _texto(p, x, y, s, tam=15.0, color=TINTA, **k) -> None:
-    _dibujar(p, x, y, _tr(s), tam, color, **k)
-
-
-def _dibujar(p, x, y, s, tam=15.0, color=TINTA, **k) -> None:
     p.setFont(_fuente(tam, **k))
     p.setPen(color)
     p.drawText(QPointF(x, y), s)
@@ -115,7 +112,7 @@ def _caja(p, r: QRectF, color=GRIS, rayas=True, ancho=1.2) -> None:
 
 
 def _rotulo(p, x, y, s, color=MORADO) -> None:
-    _dibujar(p, x, y, s, 8.5, color)
+    _texto(p, x, y, s, 8.5, color)
 
 
 def _d_texto(p):

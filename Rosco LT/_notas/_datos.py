@@ -2,11 +2,16 @@
 """Dónde se guardan las tareas.
 
 - **De IngeTrazo** (para todos los modelos) y opciones: un JSON en
-  ``%APPDATA%\\IngeTrazo\\rosco_lt\\tareas.json``, fuera de la carpeta del
-  plugin para que reinstalarlo no lo borre.
+  ``%APPDATA%\\IngeTrazo\\<clave>\\tareas.json`` (``_ajustes.carpeta_datos``),
+  fuera de la carpeta del plugin para que reinstalarlo no lo borre.
 - **Del modelo**: el valor de ``app.document_data`` dentro del ``.igz``, un
-  dict ``{"tareas": [...]}``, con la clave «rosco_lt_tareas» (la ``app`` que llega
-  aquí es una copia de la de Rosco LT con esa clave).
+  dict ``{"tareas": [...]}``, con la clave «<clave>_tareas» (la ``app`` que
+  llega aquí es una copia de la de Rosco con esa clave).
+
+La completa (clave «rosco») guardaba antes las tareas en otro sitio
+(``ANTES``): si el archivo o la clave nuevos no existen y los de antes sí, se
+leen los de antes (el archivo se copia ya al sitio nuevo; la clave del
+modelo pasa a la nueva al guardar). Los de antes no se borran.
 
 Una tarea es ``{"texto", "hecha", "creada", "hecha_en"}`` (fechas ISO).
 """
@@ -21,8 +26,13 @@ from pathlib import Path
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt")
+from .._ajustes import CLAVE, carpeta_datos, registro
 
+log = registro("tareas")
+CLAVE_MODELO = f"{CLAVE}_tareas"       # la clave de las tareas del modelo en el .igz
+# Dónde las guardaba la completa antes de esta versión: (carpeta, archivo, clave
+# del modelo). Son nombres técnicos de datos ya guardados por los usuarios.
+ANTES = {"rosco": ("bitnotes", "bitnotes.json", "bitnotes")}.get(CLAVE)  # nombre técnico
 VERSION_DATOS = 1
 
 
@@ -56,7 +66,14 @@ def carpeta_usuario_plugins() -> Path:
 
 
 def ruta_datos() -> Path:
-    return carpeta_usuario_plugins().parent / "rosco_lt" / "tareas.json"
+    return carpeta_datos() / "tareas.json"
+
+
+def ruta_antigua() -> Path | None:
+    """El archivo de antes (solo la completa lo tuvo)."""
+    if not ANTES:
+        return None
+    return carpeta_usuario_plugins().parent / ANTES[0] / ANTES[1]
 
 
 # ---- Almacén global ------------------------------------------------------------
@@ -68,7 +85,22 @@ class Almacen:
     def __init__(self, ruta: Path | None = None) -> None:
         self.ruta = ruta or ruta_datos()
         self.datos = self._vacio()
+        if ruta is None:
+            self._traer_antiguo()
         self._leer()
+
+    def _traer_antiguo(self) -> None:
+        """Sin archivo nuevo y con el de antes: se copia al sitio nuevo (el de
+        antes se queda como estaba)."""
+        antiguo = ruta_antigua()
+        try:
+            if antiguo is None or self.ruta.exists() or not antiguo.is_file():
+                return
+            self.ruta.parent.mkdir(parents=True, exist_ok=True)
+            self.ruta.write_bytes(antiguo.read_bytes())
+            log.info("tareas copiadas de %s a %s", antiguo, self.ruta)
+        except OSError:
+            log.exception("no se pudieron copiar las tareas de antes")
 
     @staticmethod
     def _vacio() -> dict:
@@ -81,7 +113,7 @@ class Almacen:
         except FileNotFoundError:
             return
         except (OSError, ValueError):
-            log.exception("tareas.json ilegible; se aparta y se empieza de cero")
+            log.exception("%s ilegible; se aparta y se empieza de cero", self.ruta.name)
             try:
                 self.ruta.replace(self.ruta.with_suffix(".json.roto"))
             except OSError:
@@ -126,8 +158,24 @@ class Almacen:
 
 # ---- Datos del modelo -----------------------------------------------------------
 
+def _antiguas_modelo(app):
+    """Las tareas del modelo guardadas con la clave de antes, o None."""
+    if not ANTES:
+        return None
+    try:
+        import copy
+        vieja = copy.copy(app)
+        vieja.key = ANTES[2]
+        return vieja.document_data({}) or None
+    except Exception:  # noqa: BLE001
+        log.exception("no se pudieron leer las tareas de antes del modelo")
+        return None
+
+
 def tareas_modelo(app) -> list[dict]:
     crudo = app.document_data({}) or {}
+    if not crudo:
+        crudo = _antiguas_modelo(app) or {}   # pasan a la clave nueva al guardarlas
     if not isinstance(crudo, dict):
         return []
     return limpias(crudo.get("tareas"))
@@ -135,7 +183,7 @@ def tareas_modelo(app) -> list[dict]:
 
 def poner_tareas_modelo(app, lista: list[dict]) -> None:
     """Un paso de deshacer; deja el modelo sin guardar, como cualquier edición."""
-    crudo = app.document_data({}) or {}
+    crudo = app.document_data({}) or _antiguas_modelo(app) or {}
     datos = dict(crudo) if isinstance(crudo, dict) else {}
     datos["tareas"] = lista
     limpio = {k: v for k, v in datos.items() if v}

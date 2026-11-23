@@ -12,6 +12,8 @@ nativa la aplicaría fuera del grupo, así que esa corrección se desactiva.
 """
 from __future__ import annotations
 
+from ._ajustes import atributo
+
 import logging
 
 from PySide6.QtCore import QTimer
@@ -142,6 +144,6 @@ class EmpujeEnGrupos:
 
 
 def instalar(tool) -> None:
-    if tool is None or getattr(tool, "_rosco_lt_empuje", None) is not None:
+    if tool is None or getattr(tool, atributo("empuje"), None) is not None:
         return
-    tool._rosco_lt_empuje = EmpujeEnGrupos(tool)
+    setattr(tool, atributo("empuje"), EmpujeEnGrupos(tool))

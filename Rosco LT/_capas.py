@@ -1,39 +1,38 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Capas en Rosco LT: la capa de dibujo y el desplegable que la elige.
+"""Capas en Rosco: la capa activa, el cajetín de la barra y su mini panel.
 
-IngeTrazo no tiene «capa activa»: una capa es una etiqueta que lleva cada
-cara, arista o grupo, y lo nuevo nace en la capa por defecto. La barra de dibujo guarda su
-propia capa de dibujo y, cuando una de sus herramientas termina algo (una
-base, la altura, el grupo de la pieza), pasa lo nuevo a esa capa con el
-comando nativo ``AssignLayerCommand`` (un paso de deshacer).
+La capa del cajetín ES la capa activa de IngeTrazo (la de la barra Capas y la
+columna «Activa» del panel): cambiarla aquí la cambia allí, y al revés.
+IngeTrazo pasa a la activa los grupos, componentes, cotas y textos que se
+crean; Rosco pasa además las caras y aristas sueltas que dibujan sus
+herramientas, con el comando nativo ``AssignLayerCommand`` (un paso de
+deshacer).
 
 - Lo nuevo se reconoce por GEOMETRÍA (como para agrupar): Empujar/Tirar
   rehace los objetos de las caras al previsualizar.
 - Con Grupo en «grupo» o «componente» se espera a que exista el grupo y se
   le pone la capa a él entero (lo de dentro sigue en la capa por defecto).
 - Deshacer y rehacer no vuelven a asignar nada: solo cuenta lo que se hace
-  por primera vez con una herramienta de la barra de dibujo.
+  por primera vez con una herramienta del anillo.
 
-En la barra de selección el mismo desplegable pasa lo seleccionado a otra
-capa.
+Los botones del cajetín (hacer activa, aislar, bloquear) actúan sobre la
+capa de lo seleccionado; sin selección, sobre la activa. Para que el panel
+Capas y su barra se enteren (y «Estado anterior» lo recuerde), se usan sus
+propias funciones cuando están.
 """
 from __future__ import annotations
 
 from ._idioma import _tr
 import logging
 
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QAction, QActionGroup, QCursor
-from PySide6.QtWidgets import QInputDialog, QMenu
+from PySide6.QtWidgets import QDockWidget
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.anillo")
+from ._ajustes import registro
 
-NUEVA = "Nueva capa…"
-
-
+log = registro("anillo")
 def capa_por_defecto() -> str:
     try:
-        from core.layers import DEFAULT_LAYER                   # interno de 0.5.8
+        from core.layers import DEFAULT_LAYER                   # interno de IngeTrazo
         return DEFAULT_LAYER
     except Exception:  # noqa: BLE001
         return "Layer 0"
@@ -55,19 +54,122 @@ def capa_de(entidad) -> str:
 
 
 def capa_de_seleccion(scene) -> str | None:
-    """La capa común de lo seleccionado, o None si hay varias."""
+    """La capa común de lo seleccionado, o None si hay varias (o nada)."""
     capas = {capa_de(e) for e in scene.selection}
     return capas.pop() if len(capas) == 1 else None
+
+
+def activa(scene) -> str:
+    """La capa activa de IngeTrazo (donde va lo nuevo)."""
+    try:
+        from core.layers import active_layer
+        return active_layer(scene)
+    except Exception:  # noqa: BLE001
+        return capa_por_defecto()
+
+
+def color_de(scene, nombre) -> tuple:
+    """``(r, g, b)`` de 0 a 1: el color con que el panel pinta la capa."""
+    try:
+        from core.layers import layer_color
+        ly = scene.layer(nombre)
+        if ly is not None:
+            return tuple(layer_color(ly))[:3]
+    except Exception:  # noqa: BLE001
+        pass
+    return (0.9, 0.9, 0.9)
+
+
+def panel_nativo(win):
+    """El panel Capas de IngeTrazo (su pestaña), o None."""
+    for d in win.findChildren(QDockWidget):
+        if d.objectName() == "tray_layers":
+            return d.widget()
+    return None
 
 
 def asignar(viewport, entidades, nombre) -> bool:
     entidades = [e for e in entidades if capa_de(e) != nombre]
     if not entidades:
         return False
-    from core.history import AssignLayerCommand              # interno de 0.5.8
+    from core.history import AssignLayerCommand              # interno de IngeTrazo
     viewport.history.execute(AssignLayerCommand(entidades, nombre))
     viewport.notify_scene_changed()
     return True
+
+
+def _avisar(viewport) -> None:
+    scene = viewport.scene
+    try:
+        scene.version += 1
+    except Exception:  # noqa: BLE001
+        pass
+    viewport.notify_scene_changed()
+    panel = panel_nativo(viewport.window())
+    if panel is not None and callable(getattr(panel, "refresh", None)):
+        try:
+            panel.refresh()
+        except Exception:  # noqa: BLE001
+            log.exception("el panel Capas no se refrescó")
+
+
+def hacer_activa(viewport, nombre) -> None:
+    panel = panel_nativo(viewport.window())
+    if panel is not None and callable(getattr(panel, "set_active", None)):
+        panel.set_active(nombre)
+    else:
+        from core.layers import set_active
+        set_active(viewport.scene, nombre)
+    _avisar(viewport)
+
+
+def aislada(viewport, nombre) -> bool:
+    panel = panel_nativo(viewport.window())
+    try:
+        if panel is not None and callable(getattr(panel, "isolated_layers", None)):
+            return nombre in panel.isolated_layers()
+        from core.layers import is_isolated
+        return bool(is_isolated(viewport.scene, nombre))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def aislar(viewport, nombre) -> None:
+    """Muestra solo ``nombre``; si ya lo estaba, vuelven todas."""
+    panel = panel_nativo(viewport.window())
+    if panel is not None and callable(getattr(panel, "toggle_isolate", None)):
+        panel.toggle_isolate([nombre])
+    else:
+        from core.layers import is_isolated, isolate, set_visible
+        scene = viewport.scene
+        if is_isolated(scene, nombre):
+            set_visible(scene, [ly.name for ly in scene.layers], True)
+        else:
+            isolate(scene, [nombre])
+    _avisar(viewport)
+
+
+def bloqueada(scene, nombre) -> bool:
+    ly = scene.layer(nombre) if nombre else None
+    return bool(ly is not None and getattr(ly, "locked", False))
+
+
+def oculta(scene, nombre) -> bool:
+    ly = scene.layer(nombre) if nombre else None
+    return bool(ly is not None and not getattr(ly, "visible", True))
+
+
+def bloquear(viewport, nombre) -> bool:
+    """Bloquea o desbloquea ``nombre``. Devuelve el estado nuevo."""
+    nuevo = not bloqueada(viewport.scene, nombre)
+    panel = panel_nativo(viewport.window())
+    if panel is not None and callable(getattr(panel, "set_locked", None)):
+        panel.set_locked([nombre], nuevo)
+    else:
+        from core.layers import set_locked
+        set_locked(viewport.scene, [nombre], nuevo)
+    _avisar(viewport)
+    return nuevo
 
 
 def _clave_punto(p):
@@ -83,27 +185,22 @@ def _clave_arista(e):
 
 
 class Capas:
-    """La capa de dibujo de la barra de dibujo y el vigilante que la aplica."""
+    """La capa activa vista desde el anillo y el vigilante que la aplica."""
 
     def __init__(self, cadena) -> None:
         self.cadena = cadena
-        self.capa: str | None = None          # None = la capa por defecto
         self._escena = None
         self._pila = 0
         self._vistos: set = set()             # órdenes ya tratadas (rehacer)
         self._caras: set = set()
         self._aristas: set = set()
         self._grupos: set = set()
-        self.agrupando = False                # La barra de dibujo está creando el grupo
+        self.agrupando = False                # el anillo está creando el grupo
+        self.mini = None                      # el mini panel (``_capas_panel``)
 
-    # -- la capa elegida --
+    # -- la capa elegida: la activa de IngeTrazo --
     def actual(self, scene) -> str:
-        """La capa de dibujo; si ya no existe (otro documento), la de por
-        defecto."""
-        if self.capa is not None and scene.layer(self.capa) is not None:
-            return self.capa
-        self.capa = None
-        return capa_por_defecto()
+        return activa(scene)
 
     # -- el vigilante (lo llama el reloj de la cadena) --
     def _foto(self, scene) -> None:
@@ -159,55 +256,73 @@ class Capas:
         except Exception:  # noqa: BLE001
             log.exception("no se pudo pasar la pieza a la capa %s", destino)
 
-    # -- el desplegable --
-    def menu(self, viewport, global_pos, seleccion: bool) -> None:
-        """La lista de capas bajo la pastilla. En la barra de dibujo elige la capa de
-        dibujo; en la barra de selección pasa lo seleccionado a la capa."""
+    # -- el mini panel bajo el cajetín --
+    def abrir(self, viewport, global_pos) -> None:
+        from . import _edicion
+        if not _edicion.con("capas_panel"):
+            self._lista(viewport, global_pos)
+            return
+        from ._capas_panel import MiniCapas
+        if self.mini is None:
+            self.mini = MiniCapas(self.cadena)
+        self.mini.abrir(viewport, global_pos)
+
+    def cerrar(self) -> None:
+        if self.mini is not None:
+            self.mini.close()
+
+    def _lista(self, viewport, global_pos) -> None:
+        """Sin el mini panel: la lista de capas en un menú; la elegida pasa a
+        ser la activa. Al final, «Nueva capa…»."""
+        from PySide6.QtWidgets import QInputDialog, QMenu
+        from ._idioma import _tr
         scene = viewport.scene
-        marcada = capa_de_seleccion(scene) if seleccion else self.actual(scene)
+        act = activa(scene)
         m = QMenu(self.cadena.app.window)
-        grupo = QActionGroup(m)
         for nombre in nombres(scene):
-            ly = scene.layer(nombre)
-            extra = ""
-            if ly is not None and not getattr(ly, "visible", True):
-                extra += _tr(" (oculta)")
-            if ly is not None and getattr(ly, "locked", False):
-                extra += _tr(" (bloqueada)")
-            a = QAction(nombre + extra, _tr(m))
+            a = m.addAction(_tr(nombre))
             a.setCheckable(True)
-            a.setChecked(nombre == marcada)
+            a.setChecked(nombre == act)
             a.setData(nombre)
-            grupo.addAction(_tr(a))
-            m.addAction(_tr(a))
         m.addSeparator()
-        nueva = m.addAction(_tr(NUEVA))
+        nueva = m.addAction(_tr("Nueva capa…"))
         elegida = m.exec(global_pos)
-        # El clic que cerró la lista (dentro o fuera) no debe llegar al modelo.
-        self.cadena.tragar_clic()
         if elegida is None:
             return
-        if elegida is nueva:
-            nombre = self._pedir_nombre(scene)
-            if not nombre:
-                return
-        else:
-            nombre = elegida.data()
-        if seleccion:
-            if asignar(viewport, list(scene.selection), nombre):
-                viewport.flash_status(_tr("Selección pasada a la capa «{0}».", nombre), 4000)
-            return
-        if scene.layer(nombre) is None:
-            from core.layers import Layer
-            scene.layers.append(Layer(nombre))
-            scene.version += 1
-            viewport.notify_scene_changed()
-        self.capa = None if nombre == capa_por_defecto() else nombre
-        viewport.flash_status(_tr("Rosco LT: lo que dibujes irá a la capa «{0}».", nombre), 5000)
+        try:
+            if elegida is nueva:
+                nombre, ok = QInputDialog.getText(self.cadena.app.window, _tr("Nueva capa"),
+                                                  _tr("Nombre de la capa:"),
+                                                  text=_tr("Capa {0}", len(scene.layers)))
+                nombre = (nombre or "").strip()
+                if not ok or not nombre:
+                    return
+                from core.layers import Layer, unique_name     # como el mini panel
+                if scene.layer(nombre) is not None:
+                    nombre = unique_name({ly.name for ly in scene.layers}, nombre)
+                scene.layers.append(Layer(nombre))
+                hacer_activa(viewport, nombre)
+            else:
+                hacer_activa(viewport, elegida.data())
+            viewport.flash_status(_tr("Capa activa: «{0}».", activa(scene)), 3000)
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo cambiar la capa activa")
+        viewport.update()
 
-    def _pedir_nombre(self, scene) -> str | None:
-        n = len(scene.layers)
-        nombre, ok = QInputDialog.getText(self.cadena.app.window, _tr("Nueva capa"),
-                                          _tr("Nombre de la capa:"), text=_tr("Capa {0}", n))
-        nombre = nombre.strip() if ok else ""
-        return nombre or None
+
+def pintar_aplicar(p, cx, cy, s=1.0) -> None:
+    """Como «Pasar a la capa activa» de IngeTrazo, en claro: dos hojas, la de
+    arriba naranja, y una flecha hacia abajo."""
+    from PySide6.QtCore import QPointF, QRectF
+    from PySide6.QtGui import QBrush, QColor, QPen
+    negro, naranja = QColor(30, 30, 30), QColor(240, 110, 40)
+    p.setPen(QPen(negro, 1.1))
+    p.setBrush(QBrush(QColor(255, 255, 255)))
+    p.drawRoundedRect(QRectF(cx - 7 * s, cy - 2 * s, 10 * s, 7 * s), 1.5, 1.5)
+    p.setBrush(QBrush(naranja))
+    p.drawRoundedRect(QRectF(cx - 5 * s, cy - 6 * s, 10 * s, 7 * s), 1.5, 1.5)
+    p.setPen(QPen(negro, 1.5))
+    ax = cx + 6 * s
+    p.drawLine(QPointF(ax, cy - 1 * s), QPointF(ax, cy + 6 * s))
+    p.drawLine(QPointF(ax - 2.6 * s, cy + 3.4 * s), QPointF(ax, cy + 6 * s))
+    p.drawLine(QPointF(ax + 2.6 * s, cy + 3.4 * s), QPointF(ax, cy + 6 * s))

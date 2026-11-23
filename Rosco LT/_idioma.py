@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""El idioma de Rosco LT (Opciones ▸ Idioma).
+"""El idioma (Opciones ▸ Idioma).
 
 Los textos se escriben en español y se traducen en el momento de enseñarlos,
 porque muchos también son claves internas (los modos de cada orden, por
@@ -12,24 +12,39 @@ cambian al reabrirlas o al reiniciar IngeTrazo.
 """
 from __future__ import annotations
 
-import logging
+import re
 
-log = logging.getLogger("ingetrazo.plugins.rosco_lt.idioma")
+from ._ajustes import NOMBRE, NOMBRE_BASE, registro
 
-IDIOMAS = (("es", "Español"), ("en", "English"), ("fr", "Français"), ("de", "Deutsch"), ("zh", "中文"), ("hi", "हिन्दी"))
+log = registro("idioma")
+
+IDIOMAS = (("es", "Español"), ("en", "English"), ("fr", "Français"), ("de", "Deutsch"), ("zh", "中文"),
+           ("hi", "हिन्दी"))
 _COLUMNA = {"en": 0, "fr": 1, "de": 2, "zh": 3, "hi": 4}
-_SUSTITUTAS = {"zh": ["Microsoft YaHei UI", "Microsoft YaHei"], "hi": ["Nirmala UI"]}
+# La fuente que tiene todos los caracteres de cada escritura (nombres de familia
+# de las fuentes que trae el sistema; no se pueden cambiar).
+_SUSTITUTAS = {"zh": ["Microsoft YaHei UI", "Microsoft YaHei"], "hi": ["Nirmala UI"]}  # nombre técnico
 CLAVE = "idioma/actual"
+# El nombre de la edición en los textos: los textos se escriben con el de la
+# completa y, en otra edición, se cambia al enseñarlos (también traducidos).
+_NOMBRE = re.compile(r"\b" + re.escape(NOMBRE_BASE) + r"\b(?! LT\b)") if NOMBRE != NOMBRE_BASE else None
 
 _actual = None
-_faltan: set | None = None              # solo en las pruebas: lo que no se encontró
 _previas: tuple | None = None           # (familia, sustitutas que tenía) mientras hay una puesta
+_faltan: set | None = None              # solo en las pruebas: lo que no se encontró
+
+
+def con_nombre(texto: str) -> str:
+    """``texto`` con el nombre de esta edición."""
+    if _NOMBRE is None or not isinstance(texto, str):
+        return texto
+    return _NOMBRE.sub(NOMBRE, texto)
 
 
 def _fuente() -> None:
     """En chino y en hindi, una sola fuente para todos los caracteres: si no,
-    Windows mezcla varias y algunos salen con otro grosor. Al cambiar de idioma
-    se quita la anterior, para que no se pisen."""
+    el sistema mezcla varias y algunos salen con otro grosor. Al cambiar de
+    idioma se quita la anterior, para que no se pisen."""
     global _previas
     sustitutas = _SUSTITUTAS.get(_actual)
     if _previas is None and not sustitutas:
@@ -95,12 +110,13 @@ def _tr(texto, *args):
             salida = fila[columna] or texto
         elif _faltan is not None and any(c.isalpha() for c in texto):
             _faltan.add(texto)
+    salida = con_nombre(salida)
     if args:
         try:
             return salida.format(*args)
         except (IndexError, KeyError, ValueError):
             log.warning("plantilla mal traducida: %r", salida)
-            return texto.format(*args)
+            return con_nombre(texto).format(*args)
     return salida
 
 

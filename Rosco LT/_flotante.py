@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Piezas comunes de la barra de dibujo y la barra de modificar (el mismo archivo va en las dos).
+"""Piezas comunes del anillo y el arco de modificar (el mismo archivo va en las dos).
 
 - ``cursor_compuesto``: mientras el ratón se mueve, la barra es parte del
   propio cursor del sistema, con el puntero de la herramienta en su centro.
@@ -23,7 +23,7 @@ from ._idioma import _tr
 import logging
 import math
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QBrush, QColor, QCursor, QFont, QFontMetricsF, QLinearGradient, QPainter,
     QPainterPath, QPainterPathStroker, QPen, QPixmap, QPolygonF, QRadialGradient,
@@ -40,7 +40,7 @@ GRIS = QColor(150, 150, 146)
 PERFIL_SUPRIMIR = QColor(214, 34, 34)  # el glifo de Suprimir, con perfil rojo (fijo, sin paleta)
 ROJO_OSCURO = QColor(150, 18, 18)
 HALO = QColor(255, 255, 255, 235)
-# Las divisiones, opacas: en el cursor de Windows lo semitransparente sale oscuro.
+# Las divisiones, opacas: en el cursor del sistema lo semitransparente sale oscuro.
 SEPARADOR = QColor(228, 130, 130)
 BLANCO = QColor(255, 255, 255)
 ROSA_CLARO = QColor(251, 228, 228)     # el fondo del botón activo rayado (relieve)
@@ -151,6 +151,28 @@ def relleno_redondo(bajo: bool) -> QColor:
     return mezcla(BLANCO, ROJO, 0.30 if bajo else 0.15)
 
 
+def mover_a(ventana, *pos) -> None:
+    """Mueve una ventana suelta a ``pos`` (global) diciéndole antes a Qt en qué
+    pantalla va (la de su centro). 3.3.1: con dos monitores escalados, las
+    coordenadas de Qt tienen huecos entre pantallas y, si no, una ventana
+    llamada en el monitor pequeño podía salir en el grande."""
+    p = pos[0] if len(pos) == 1 else QPoint(int(pos[0]), int(pos[1]))
+    if isinstance(p, QPointF):
+        p = p.toPoint()
+    try:
+        from PySide6.QtGui import QGuiApplication
+        centro = p + QPoint(ventana.width() // 2, ventana.height() // 2)
+        pantalla = QGuiApplication.screenAt(centro) or QGuiApplication.screenAt(p)
+        if pantalla is not None:
+            ventana.winId()                      # que exista la ventana nativa
+            handle = ventana.windowHandle()
+            if handle is not None and handle.screen() is not pantalla:
+                handle.setScreen(pantalla)
+    except Exception:  # noqa: BLE001 — colocarla sin más
+        log.debug("no se pudo elegir la pantalla", exc_info=True)
+    ventana.move(p)
+
+
 # ---- La ventanita ---------------------------------------------------------------
 
 class Flotante(QWidget):
@@ -168,6 +190,8 @@ class Flotante(QWidget):
         self.setFocusPolicy(Qt.NoFocus)
         self.setMouseTracking(True)
         self.resize(int(ancho), int(alto))
+        self._tam = QSize(int(ancho), int(alto))   # el tamaño entero (sin recortar a la pantalla)
+        self._recorte = (0, 0)                     # lo que se ha comido el borde de la pantalla
         self.dueno = dueno
         self.vp = viewport
         self.ancla_local = QPointF(ancla_local)
@@ -178,8 +202,11 @@ class Flotante(QWidget):
         # transparente para ver el modelo debajo, y al soltar no cuenta como
         # clic. Mientras dura, la barra no se entera del ratón: no se suelta
         # ni reaparece hasta soltar, aunque el ratón salga de ella.
+        # Si el dueño lo acepta (``voz_empezar``), la pulsación larga además
+        # habla: se escucha hasta soltar (``voz_parar``).
         self._pulsando = None
         self._larga = False
+        self._voz = False
         # Transparente = no se pinta (nada de ``setWindowOpacity``: con la
         # transparencia por píxel, al volver a 1 a veces no se repintaba y
         # la barra no reaparecía al soltar).
@@ -191,15 +218,32 @@ class Flotante(QWidget):
 
     # -- posición --
     def colocar(self, ancla_vp: QPointF) -> None:
-        self.origen = QPointF(ancla_vp.x() - self.ancla_local.x(),
-                              ancla_vp.y() - self.ancla_local.y())
-        destino = self.vp.mapToGlobal(QPoint(round(self.origen.x()),
-                                             round(self.origen.y())))
+        """3.3.1: la ventanita va en la pantalla del ancla y recortada a ella. Con
+        varios monitores (y escalado), una ventana más alta que la pantalla
+        pequeña dejaba su esquina fuera de ella y Qt la llevaba a la grande."""
+        from PySide6.QtGui import QGuiApplication
+        # De visor a pantalla sumando al origen del visor (que siempre está dentro
+        # de su monitor): ``mapToGlobal`` de un punto que cae fuera del monitor
+        # (en el hueco entre pantallas escaladas) usaba la escala del otro.
+        base = self.vp.mapToGlobal(QPoint(0, 0))
+        ideal = QPointF(ancla_vp.x() - self.ancla_local.x(), ancla_vp.y() - self.ancla_local.y())
+        destino = base + QPoint(round(ideal.x()), round(ideal.y()))
+        caja = QRect(destino, self._tam)
+        centro = base + QPoint(round(ancla_vp.x()), round(ancla_vp.y()))
+        pantalla = QGuiApplication.screenAt(centro) or self.vp.screen()
+        if pantalla is not None:
+            dentro = caja.intersected(pantalla.geometry())
+            if not dentro.isEmpty():
+                caja = dentro
+            handle = self.windowHandle()
+            if handle is not None and handle.screen() is not pantalla:
+                handle.setScreen(pantalla)
+        self._recorte = (caja.x() - destino.x(), caja.y() - destino.y())
         # La posición real, redondeada, para que lo pintado cuadre al píxel.
-        local = self.vp.mapFromGlobal(destino)
+        local = caja.topLeft() - base
         self.origen = QPointF(local.x(), local.y())
-        if self.pos() != destino:
-            self.move(destino)
+        if self.geometry() != caja:
+            self.setGeometry(caja)
 
     def a_visor(self, local) -> QPointF:
         return QPointF(local) + self.origen
@@ -207,6 +251,8 @@ class Flotante(QWidget):
     def fijar_mascara(self, path_visor: QPainterPath, clave=None) -> None:
         """Solo ``path_visor`` (en px del visor) acepta clics. ``clave``
         evita rehacer la región si no ha cambiado."""
+        if clave is not None:
+            clave = (clave, self._recorte)       # recortada a la pantalla, cambia con el recorte
         if clave is not None and clave == self._mascara_clave:
             return
         self._mascara_clave = clave
@@ -254,7 +300,7 @@ class Flotante(QWidget):
                     and math.hypot(p.x() - self._pulsando.x(),
                                    p.y() - self._pulsando.y()) > ARRASTRE_PX):
                 self._reloj_pulsacion.stop()
-                self._pulsacion_larga()      # arrastrar también es «ver el modelo»
+                self._pulsacion_larga(arrastre=True)   # arrastrar también es «ver el modelo»
             return
         self._seguro(self.dueno.raton_movido, p)
 
@@ -295,20 +341,57 @@ class Flotante(QWidget):
         except Exception:  # noqa: BLE001
             return True
 
-    def _con_pulsacion(self) -> bool:
-        """Mantener pulsado hace algo: ver el modelo."""
-        return self._opcion("pulsacion_ver")
+    def _ver_o_hablar(self) -> bool:
+        return (self._opcion("pulsacion_ver")
+                or (self._opcion("pulsacion_voz") and hasattr(self.dueno, "voz_empezar")))
 
-    def _pulsacion_larga(self) -> None:
+    def _con_pulsacion(self) -> bool:
+        """Mantener pulsado hace algo: ver el modelo, hablar (si este dueño
+        escucha) o lo propio del botón (la lista de deshacer, por ejemplo)."""
+        return self._ver_o_hablar() or hasattr(self.dueno, "pulsacion_propia")
+
+    def _pulsacion_larga(self, arrastre: bool = False) -> None:
         if self._pulsando is None or not self._con_pulsacion():
+            return
+        propia = None if arrastre else getattr(self.dueno, "pulsacion_propia", None)
+        if propia is not None:
+            try:
+                hecho = bool(propia(self._pulsando))
+            except Exception:  # noqa: BLE001
+                log.exception("fallo en la pulsación larga del botón")
+                hecho = False
+            if hecho:
+                self._pulsando = None        # el soltar ya no es un clic
+                self._larga = False
+                return
+        if not self._ver_o_hablar():
             return
         self._larga = True
         self.grabMouse()                     # que el soltar llegue aunque se vea el modelo
         if self._opcion("pulsacion_ver"):
             self._transparente = True        # ver el modelo hasta soltar
             self.update()
+        empezar = getattr(self.dueno, "voz_empezar", None) if self._opcion("pulsacion_voz") else None
+        if empezar is not None:
+            try:
+                self._voz = bool(empezar(self._pulsando))
+            except Exception:  # noqa: BLE001
+                log.exception("no se pudo empezar a escuchar")
+        if not self._transparente and not self._voz:
+            # Solo voz y aquí no hay botón que escuche: nada que hacer, el
+            # soltar vuelve a ser un clic normal.
+            self._larga = False
+            try:
+                self.releaseMouse()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _fin_pulsacion_larga(self) -> None:
+        if self._voz:
+            self._voz = False
+            parar = getattr(self.dueno, "voz_parar", None)
+            if parar is not None:
+                self._seguro(parar)
         self._larga = False
         self._pulsando = None
         try:
@@ -370,13 +453,18 @@ class Flotante(QWidget):
             self._seguro(self.dueno.raton_fuera)
 
     def wheelEvent(self, ev) -> None:  # noqa: N802
-        """La rueda sobre la barra sigue haciendo zoom en el visor (sobre la
-        ayuda que no cabe entera, la desplaza)."""
+        """La rueda sobre la barra sigue haciendo zoom en el visor, salvo que
+        el dueño la quiera (3.1.0: sobre el rosco, cambia de grupo)."""
+        rueda = getattr(self.dueno, "raton_rueda", None)
+        if rueda is not None:
+            try:
+                if rueda(self.a_visor(ev.position()), ev.angleDelta().y()):
+                    ev.accept()
+                    return
+            except Exception:  # noqa: BLE001
+                log.exception("fallo en la rueda sobre la barra")
         try:
             pos = self.vp.mapFromGlobal(ev.globalPosition().toPoint())
-            desplazar = getattr(self.dueno, "raton_rueda", None)
-            if callable(desplazar) and desplazar(QPointF(pos), ev.angleDelta().y()):
-                return
             copia = QWheelEvent(QPointF(pos), ev.globalPosition(), ev.pixelDelta(),
                                 ev.angleDelta(), ev.buttons(), ev.modifiers(),
                                 ev.phase(), ev.inverted())
@@ -599,7 +687,7 @@ def dibujar_banda(painter, c, r_int, r_ext, claves, activa=None, bajo=None,
                   relieve: bool = False) -> None:
     """Banda transparente con contorno rojo, sus divisiones y los glifos.
     ``para_clic`` (ventanita fija) añade un relleno casi invisible para que
-    toda la banda reciba el clic; en el cursor NO va: Windows convierte esos
+    toda la banda reciba el clic; en el cursor NO va: el sistema convierte esos
     píxeles casi transparentes en negro opaco. Ocupa de ``a0`` a ``a0 +
     barrido`` grados (por defecto, el semicírculo de arriba). ``relieve``:
     banda opaca con volumen, divisiones en bisel y el botón activo relleno y
@@ -610,8 +698,8 @@ def dibujar_banda(painter, c, r_int, r_ext, claves, activa=None, bajo=None,
     activas = {activa} if isinstance(activa, str) else set(activa or ())
     painter.setRenderHint(QPainter.Antialiasing)
     if PALETA is not None:
-        # El degradado del contorno va alrededor de este anillo (la barra de dibujo ya lo
-        # ha fijado; la barra de modificar y las vistas previas, no).
+        # El degradado del contorno va alrededor de este anillo (el anillo ya lo
+        # ha fijado; el arco de modificar y las vistas previas, no).
         d = painter.transform().map(QPointF(c))
         if _CENTRO is None or math.hypot(d.x() - _CENTRO[0], d.y() - _CENTRO[1]) > 1.0:
             fijar_centro(painter, c, r_ext + 2.0 * CHICO_R_ANILLO + 3.0)
@@ -677,7 +765,7 @@ def dibujar_banda(painter, c, r_int, r_ext, claves, activa=None, bajo=None,
         color = colores.get(clave)
         if color is not None and para_clic:
             # Un botón con estado de color (p. ej. Grupo: rojo / azul). En el
-            # cursor no: Windows pinta oscuro lo semitransparente.
+            # cursor no: el sistema pinta oscuro lo semitransparente.
             tinte = QColor(color)
             tinte.setAlphaF(0.20)
             painter.setPen(Qt.NoPen)
@@ -707,7 +795,7 @@ def dibujar_banda(painter, c, r_int, r_ext, claves, activa=None, bajo=None,
 # ---- Chincheta y cerrar: anclar la barra ------------------------------------------------
 # Dos botoncitos en lo alto de la barra fija: la chincheta la deja anclada
 # (fija y visible, no sigue al ratón) y, a su lado, ✕ la cierra (y la
-# desancla). La barra de dibujo pone ahí Pantalla limpia (``segundo="limpia"``) y lleva
+# desancla). el anillo pone ahí Pantalla limpia (``segundo="limpia"``) y lleva
 # su ✕ junto al cursor.
 CHINCHETA_R = 8.5
 CHINCHETA_DX = 11.0                     # del centro de la barra a cada botón
@@ -737,7 +825,7 @@ def mascara_chincheta(path: QPainterPath, cx, y, dxs=None, segundo="cerrar") -> 
 def dibujar_boton_redondo(painter, clave, q, bajo=None, marcado: bool = False,
                           icono=None, relieve: bool = False) -> None:
     """Un botoncito redondo de la fila de la chincheta (o el ✕, las vistas y
-    el cancelar de la barra de dibujo), con el icono ``icono`` (o el de ``clave``)."""
+    el cancelar del anillo), con el icono ``icono`` (o el de ``clave``)."""
     from . import _iconos
     painter.save()
     painter.setRenderHint(QPainter.Antialiasing)
@@ -776,29 +864,33 @@ def texto_chincheta(clave, anclada: bool) -> str:
             else "Anclar la barra aquí: se queda fija y visible")
 
 
-def etiqueta(painter, texto, centro) -> QRectF:
+def etiqueta(painter, texto, centro, traducir: bool = True) -> QRectF:
+    if traducir:
+        texto = _tr(texto)
     f = QFont(painter.font())
     f.setPointSizeF(8.5)
     f.setBold(False)
     painter.setFont(f)
     fm = QFontMetricsF(f)
-    w = fm.horizontalAdvance(_tr(texto)) + 12.0
+    w = fm.horizontalAdvance(texto) + 12.0
     r = QRectF(centro.x() - w / 2.0, centro.y() - fm.height() / 2.0 - 2.0,
                w, fm.height() + 4.0)
     painter.setPen(Qt.NoPen)
     painter.setBrush(QBrush(QColor(44, 44, 42, 215)))
     painter.drawRoundedRect(r, 4.0, 4.0)
     painter.setPen(BLANCO)
-    painter.drawText(r, Qt.AlignCenter, _tr(texto))
+    painter.drawText(r, Qt.AlignCenter, texto)
     return r
 
 
-def rect_etiqueta(painter_font, texto, centro) -> QRectF:
+def rect_etiqueta(painter_font, texto, centro, traducir: bool = True) -> QRectF:
     """El rectángulo que ocuparía ``etiqueta`` (para la máscara)."""
+    if traducir:
+        texto = _tr(texto)
     f = QFont(painter_font)
     f.setPointSizeF(8.5)
     fm = QFontMetricsF(f)
-    w = fm.horizontalAdvance(_tr(texto)) + 12.0
+    w = fm.horizontalAdvance(texto) + 12.0
     return QRectF(centro.x() - w / 2.0, centro.y() - fm.height() / 2.0 - 2.0,
                   w, fm.height() + 4.0)
 
@@ -869,7 +961,7 @@ def _formas(clave, x, y):
     elif clave == "circle":
         negro = _circulo(x, y, 9.0)
         blanco = _circulo(x, y, 3.5)
-    elif clave == "barra_modificar":
+    elif clave == "arco_modificar":
         fuera, dentro, base = 9.0, 4.0, y + 4.0
         negro = QPainterPath()
         negro.moveTo(x - fuera, base)
@@ -882,7 +974,7 @@ def _formas(clave, x, y):
             a = math.radians(g)
             blanco.addPath(_trazo(_linea(x + dentro * math.cos(a), base - dentro * math.sin(a),
                                          x + fuera * math.cos(a), base - fuera * math.sin(a)), 1.4))
-    elif clave == "barra_dibujo":
+    elif clave == "anillo":
         negro = _poli([(x, y - 9), (x + 8, y - 4.5), (x + 8, y + 4.5), (x, y + 9),
                        (x - 8, y + 4.5), (x - 8, y - 4.5)])
         aristas = QPainterPath()
@@ -1218,6 +1310,10 @@ def _formas(clave, x, y):
     return negro, blanco
 
 
+# Lo pone la barra: clave -> el icono de la última orden de ese botón.
+ICONO_VIVO = None
+
+
 def glifo(painter, clave, c: QPointF, tinta: QColor = NEGRO, tam: float = 24.0) -> None:
     """Dibuja el icono de colores ``clave`` centrado en ``c`` (``tam`` px; en
     gris si ``tinta`` es GRIS). Si no hay icono, o con el tema B
@@ -1226,6 +1322,8 @@ def glifo(painter, clave, c: QPointF, tinta: QColor = NEGRO, tam: float = 24.0) 
     from . import _iconos
     if not clave:
         return                               # un hueco vacío
+    if ICONO_VIVO is not None:
+        clave = ICONO_VIVO(clave)            # el botón lleva el icono de su última orden
     if _iconos.pintar(painter, clave, c, tam, apagado=tinta == GRIS, tinta=tinta):
         return
     if _iconos.externo(clave):
@@ -1295,3 +1393,17 @@ def silueta(painter, clave, c: QPointF, tinta: QColor = NEGRO, escala: float = 1
         painter.strokePath(blanco, pen)
     painter.restore()
     return True
+
+
+def a_pantalla(viewport, p):
+    """El punto del mundo en px del visor (QPointF), o None si no se ve.
+    El visor lo da como una pareja (x, y)."""
+    try:
+        r = viewport._world_to_pixel(p)                  # interno de IngeTrazo
+    except Exception:  # noqa: BLE001
+        return None
+    if r is None:
+        return None
+    if isinstance(r, (tuple, list)):
+        return QPointF(float(r[0]), float(r[1]))
+    return QPointF(r)

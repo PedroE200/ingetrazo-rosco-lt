@@ -9,6 +9,8 @@ que no tienen un número fijo de pasos (el último se repite y no se cuentan).
 """
 from __future__ import annotations
 
+from ._flotante import mover_a
+from . import _edicion
 from ._idioma import _tr
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout
@@ -44,7 +46,7 @@ PASOS = {
     ("linea", "equidist."): ("Clic en una cara o una polilínea.", "Arrastra o teclea la distancia + Enter."),
     ("linea", "paralela"): ("Clic en un segmento o una línea abierta.",
                             "Lleva el ratón al lado y haz clic, o teclea la distancia + Enter."),
-    ("linea", "redondear"): ("Clic en una arista (o usa las seleccionadas).",
+    ("empujar", "redondear 3D"): ("Clic en una arista (o usa las seleccionadas).",
                              "Aleja el ratón o teclea el radio + Enter."),
     ("medir", "cota"): ("Clic en el primer punto.", "Clic en el segundo punto.",
                         "Clic en la posición de la línea de cota."),
@@ -52,6 +54,12 @@ PASOS = {
     ("move", "mover"): ("Clic en el punto base.", "Clic en el destino (o teclea la distancia + Enter)."),
     ("move", "copia"): ("Clic en el punto base.", "Clic donde quieras la copia (o teclea la distancia + Enter)."),
     ("move", "empujar/tirar"): ("Clic en una cara.", "Mueve el ratón y haz clic, o teclea la altura + Enter."),
+    ("move", "estirar ventana"): ("Clic en una esquina de la ventana.", "Clic en la esquina opuesta.",
+                                  "Clic en el punto base.", "Clic en el destino (o teclea la distancia + Enter)."),
+    ("move", "prolongar a plano"): ("Clic en el elemento, cerca del extremo que se alarga.",
+                                    "Clic en la cara que hace de plano."),
+    ("linea", "contorno 3D"): ("Elige las aristas del perímetro (las seleccionadas, o clic en ellas).",
+                               "Ratón sobre una cara del lado y clic, o teclea la distancia + Enter."),
     ("move", "vértices"): ("Pasa por un vértice y arrastra su cuadradito verde.",
                            "Clic en el destino (o teclea la distancia + Enter)."),
     ("scale", "libre"): ("Clic en un tirador de la caja.", "Mueve el ratón y haz clic, o teclea la escala + Enter."),
@@ -60,6 +68,7 @@ PASOS = {
     ("rotate", "con copia"): ("Clic en el centro de giro.", "Clic en el inicio del ángulo.",
                               "Clic en el ángulo final (o teclea los grados + Enter)."),
 }
+PASOS = _edicion.limpiar(PASOS)
 ABIERTAS = {
     ("move", "alinear"): ("Selecciona primero lo que quieras alinear.",),
     ("linea", "línea"): ("Clic en el primer punto.",
@@ -121,6 +130,6 @@ class LineaOrden(QFrame):
             self.style().polish(self)
         destino = QPoint(pos.x() - self.width() // 2, pos.y() - self.height() if pegada else pos.y())
         if self.pos() != destino:
-            self.move(destino)
+            mover_a(self, destino)
         if not self.isVisible():
             self.show()
